@@ -140,7 +140,7 @@ class AsyncCrawler:
         return {url: body for url, body in results if body is not None}
 
     async def fetch_and_parse(self, url: str) -> dict:
-        """Fetch a page and parse it into url/title/text/links/metadata."""
+        """Fetch a page and parse it into the HTMLParser page dict."""
         html = await self.fetch_url(url)
         return await self.parser.parse_html(html, url)
 

@@ -4,6 +4,8 @@ Minimal async HTTP crawler on **aiohttp**.
 
 It fetches one URL or many URLs in parallel with a shared `ClientSession`,
 connect/read timeouts, connection pooling, and a concurrency cap.
+Fetched HTML can be parsed into title, text, same-host links, images,
+headings, tables, and lists.
 
 ## What it does
 
@@ -17,10 +19,15 @@ Public classes: `AsyncCrawler` (HTTP) and `HTMLParser` (BeautifulSoup).
 | `TCPConnector(limit, limit_per_host)` | Keep-alive connection pool |
 | `fetch_url(url) -> str` | GET one page; raise HTTP / timeout / network errors |
 | `fetch_urls(urls) -> dict[str, str]` | Parallel GET; skip those errors |
-| `fetch_and_parse(url) -> dict` | Fetch + parse into `{url, title, text, links, metadata}` |
+| `fetch_and_parse(url) -> dict` | Fetch + parse into the page dict |
 | `HTMLParser.parse_html(html, url)` | Same dict from raw HTML |
-| `HTMLParser.extract_links / extract_text / extract_metadata` | Links (absolute http(s)), visible text, title/description/keywords |
+| `extract_links` | Relative → absolute, same-host only, validated http(s) |
+| `extract_images / extract_headings / extract_tables / extract_lists` | Structured extras |
 | `close()` / `async with` | Close session + pool |
+
+Page dict: `{url, title, text, links, link_details, metadata, images, headings, tables, lists}`.
+
+Parse failures log a WARNING and return a partial dict (`url` is always set).
 
 Logging (`crawler.async_crawler`):
 
@@ -48,6 +55,12 @@ Parallel vs sequential demo (needs network; prints status + timing):
 PYTHONPATH=. python examples/parallel_demo.py
 ```
 
+Parse demo (needs network; prints stats, headings, relative vs absolute links):
+
+```bash
+PYTHONPATH=. python examples/parse_demo.py
+```
+
 Library usage:
 
 ```python
@@ -65,12 +78,25 @@ async def main():
         print(list(pages.keys()))
 
         page = await crawler.fetch_and_parse("https://example.com")
-        print(page["title"], page["links"][:3])
+        print(page["title"], page["links"][:3], len(page["images"]))
 
 asyncio.run(main())
 ```
 
 Always close via `async with` or `await close()`.
+
+Parse demo output looks like:
+
+```python
+{
+    "url": "https://example.com",
+    "title": "Example Domain",
+    "text_length": 1234,
+    "links_count": 5,
+    "links": ["https://example.com/page1", "..."],
+    "images_count": 2
+}
+```
 
 ## Tests
 
@@ -81,8 +107,8 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-All tests are offline (fake `ClientSession`). Current cases in
-`tests/test_async_crawler.py`:
+All tests are offline (fake `ClientSession`). HTTP cases live in
+`tests/test_async_crawler.py`; parser cases in `tests/test_html_parser.py`.
 
 | Test | Checks |
 |---|---|
@@ -99,10 +125,18 @@ All tests are offline (fake `ClientSession`). Current cases in
 | `test_context_manager_closes_session` | `async with` closes |
 | `test_fetch_url_logs_start_and_success` | INFO start + success |
 | `test_fetch_url_logs_error_type` | WARNING includes URL + exception class |
-| `test_parse_html_returns_page_dict` | title/text/links/metadata |
+| `test_parse_html_returns_page_dict` | title/text/same-host links/images/headings/tables/lists |
+| `test_extract_links_converts_relative_and_filters_outer` | relative → absolute, drop outer hosts |
 | `test_extract_links_skips_non_http` | skip javascript/mailto/fragments |
+| `test_to_absolute_url_and_validation` | resolve + `is_valid_url` |
 | `test_extract_text_with_selector` | CSS selector + missing node |
 | `test_extract_metadata_falls_back_to_og` | og:title / og:description |
+| `test_extract_images_headings_tables_lists` | structured extras |
+| `test_parse_html_handles_incorrect_html` | broken markup still returns a dict |
+| `test_parse_html_returns_partial_on_extractor_error` | WARNING + empty field, rest kept |
+| `test_parse_html_logs_invalid_links` | invalid href / missing img src |
+| `test_www_and_bare_host_are_same_site` | `www.` does not count as outer |
+| `test_extract_link_details_marks_relative_and_outer` | original href vs absolute, outer skipped |
 | `test_fetch_and_parse_uses_parser` | crawler fetch + parse (fake session) |
 
-`examples/parallel_demo.py` is a live network demo, not a pytest test.
+`examples/parallel_demo.py` and `examples/parse_demo.py` are live network demos, not pytest tests.
