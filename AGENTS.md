@@ -16,6 +16,7 @@ Python async HTTP crawler using **aiohttp**. Package lives in `crawler/`.
 
 - Python 3.9+
 - aiohttp 3.x
+- beautifulsoup4 (stdlib `html.parser`)
 - pytest + pytest-asyncio for tests
 
 ## Layout
@@ -23,7 +24,8 @@ Python async HTTP crawler using **aiohttp**. Package lives in `crawler/`.
 ```
 crawler/                 # importable package
   __init__.py            # exports AsyncCrawler
-  async_crawler.py       # AsyncCrawler implementation
+  async_crawler.py       # AsyncCrawler (HTTP)
+  html_parser.py         # HTMLParser (BeautifulSoup)
 tests/                   # pytest (no network)
 examples/
   fetch_example.py       # tiny usage
@@ -32,14 +34,23 @@ requirements.txt
 requirements-dev.txt
 ```
 
-## Current API (step 3)
+## Current API (step 4)
 
 `AsyncCrawler(max_concurrent=10, *, connect_timeout=10, read_timeout=30, total_timeout=60, pool_limit=100, pool_limit_per_host=max_concurrent)`
 
 - `fetch_url(url: str) -> str` — GET one URL, return body text
 - `fetch_urls(urls: list[str]) -> dict[str, str]` — parallel GET; skip known failures
+- `fetch_and_parse(url: str) -> dict` — fetch then parse (see page dict)
 - `close()` — `await session.close()` then `asyncio.sleep(0)` so SSL transports finish
 - also supports `async with AsyncCrawler() as c`
+
+`HTMLParser`
+- `parse_html(html, url) -> dict` — async; builds the page dict
+- `extract_links(soup, base_url) -> list[str]` — unique absolute http(s) from `<a href>`
+- `extract_text(soup, selector=None) -> str` — visible text; optional CSS selector
+- `extract_metadata(soup) -> dict` — `{title, description, keywords}`
+
+Page dict: `{url, title, text, links, metadata}`. Links are absolute http(s); fragments / mailto / javascript skipped.
 
 Session is created lazily in `_get_session()`:
 - `ClientTimeout(total, connect, sock_read=read_timeout)` — aiohttp has no `read=`
@@ -79,4 +90,4 @@ Callers configure logging (`logging.basicConfig`). Tests use `caplog`.
 
 ## Next likely steps
 
-Retries, robots.txt, link extraction, rate limits, user-agent, persistence.
+Retries, robots.txt, crawl queue from extracted links, rate limits, user-agent, persistence.

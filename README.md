@@ -7,7 +7,7 @@ connect/read timeouts, connection pooling, and a concurrency cap.
 
 ## What it does
 
-`AsyncCrawler` is the only public class (`from crawler import AsyncCrawler`).
+Public classes: `AsyncCrawler` (HTTP) and `HTMLParser` (BeautifulSoup).
 
 | Piece | Role |
 |---|---|
@@ -17,6 +17,9 @@ connect/read timeouts, connection pooling, and a concurrency cap.
 | `TCPConnector(limit, limit_per_host)` | Keep-alive connection pool |
 | `fetch_url(url) -> str` | GET one page; raise HTTP / timeout / network errors |
 | `fetch_urls(urls) -> dict[str, str]` | Parallel GET; skip those errors |
+| `fetch_and_parse(url) -> dict` | Fetch + parse into `{url, title, text, links, metadata}` |
+| `HTMLParser.parse_html(html, url)` | Same dict from raw HTML |
+| `HTMLParser.extract_links / extract_text / extract_metadata` | Links (absolute http(s)), visible text, title/description/keywords |
 | `close()` / `async with` | Close session + pool |
 
 Logging (`crawler.async_crawler`):
@@ -61,6 +64,9 @@ async def main():
         print(html[:200])
         print(list(pages.keys()))
 
+        page = await crawler.fetch_and_parse("https://example.com")
+        print(page["title"], page["links"][:3])
+
 asyncio.run(main())
 ```
 
@@ -93,5 +99,10 @@ All tests are offline (fake `ClientSession`). Current cases in
 | `test_context_manager_closes_session` | `async with` closes |
 | `test_fetch_url_logs_start_and_success` | INFO start + success |
 | `test_fetch_url_logs_error_type` | WARNING includes URL + exception class |
+| `test_parse_html_returns_page_dict` | title/text/links/metadata |
+| `test_extract_links_skips_non_http` | skip javascript/mailto/fragments |
+| `test_extract_text_with_selector` | CSS selector + missing node |
+| `test_extract_metadata_falls_back_to_og` | og:title / og:description |
+| `test_fetch_and_parse_uses_parser` | crawler fetch + parse (fake session) |
 
 `examples/parallel_demo.py` is a live network demo, not a pytest test.
