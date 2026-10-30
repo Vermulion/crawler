@@ -8,6 +8,8 @@ from typing import Optional
 
 import aiohttp
 
+from crawler.html_parser import HTMLParser
+
 logger = logging.getLogger(__name__)
 
 # Default pool size matches aiohttp's TCPConnector.limit.
@@ -52,6 +54,7 @@ class AsyncCrawler:
         )
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._session: Optional[aiohttp.ClientSession] = None
+        self.parser = HTMLParser()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -135,6 +138,11 @@ class AsyncCrawler:
 
         results = await asyncio.gather(*(_safe_fetch(url) for url in urls))
         return {url: body for url, body in results if body is not None}
+
+    async def fetch_and_parse(self, url: str) -> dict:
+        """Fetch a page and parse it into the HTMLParser page dict."""
+        html = await self.fetch_url(url)
+        return await self.parser.parse_html(html, url)
 
     async def close(self) -> None:
         """Close the HTTP session and its connection pool."""
