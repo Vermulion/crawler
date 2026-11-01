@@ -2,5 +2,6 @@
 
 from crawler.async_crawler import AsyncCrawler
 from crawler.html_parser import HTMLParser
+from crawler.semaphore_manager import SemaphoreManager
 
-__all__ = ["AsyncCrawler", "HTMLParser"]
+__all__ = ["AsyncCrawler", "HTMLParser", "SemaphoreManager"]

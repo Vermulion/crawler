@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import heapq
-from nt import error
 from typing import Iterable, Optional
+from crawler.url_filter import URLFilter
 
 
 class CrawlerQueue:
@@ -13,36 +13,45 @@ class CrawlerQueue:
         start_urls: Optional[Iterable[str]] = None,
         *,
         max_pages: Optional[int] = None,
+        max_depth: Optional[int] = None,
+        url_filter: Optional[URLFilter] = None,
+
     ) -> None:
         if max_pages is not None and max_pages < 1:
             raise ValueError("max_pages must be >= 1")
+        if max_depth is not None and max_depth < 0:
+            raise ValueError("max_depth must br >= 0")
 
         self.max_pages = max_pages
+        self.max_depth = max_depth
         self._pending: list[tuple[int, int, str]] = []
         self._seen: set[str] = set()
         self._in_progress: set[str] = set()
         self._processed: set[str] = set()
         self._failed: dict[str, str] = {}
         self._seq = 0
+        self._depths: dict[str, int] = {}
+        self.url_filter = url_filter
 
         if start_urls is not None:
             for url in start_urls:
                 self.add_url(url)
     
-    def add_url(self, url: str, priority: int = 0) -> None:
-        """Queue a URL if it is new and the page limit is not reached.
+    def add_url(self, url: str, priority: int = 0, depth: int = 0) -> None:
 
-        Larger ``priority`` is fetched first. Same priority keeps insertion order.
-        """
+        if self.url_filter is not None and not self.url_filter.allow(url):
+            return
         if url in self._seen:
+            return
+        if self.max_depth is not None and depth > self.max_depth:
             return
         if self.max_pages is not None and len(self._seen) >= self.max_pages:
             return
-        
+
         self._seen.add(url)
-        # heapq is a min-heap: store -priority so bigger numbers come out first.
-        heapq.heappush(self._pending, (-priority, self.seq, url))
-        self.seq += 1
+        self._depths[url] = depth
+        heapq.heappush(self._pending, (-priority, self._seq, url))
+        self._seq += 1
 
     async def get_next(self) -> str | None:
         """Take the highest-priority pending URL, or None if the queue is empty."""
