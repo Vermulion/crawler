@@ -1,6 +1,6 @@
 from __future__ import annotations
+
 import re
-from token import OP
 from typing import Iterable, Optional
 from urllib.parse import urlparse
 

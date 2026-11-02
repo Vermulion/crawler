@@ -9,9 +9,10 @@ from typing import Optional
 
 import aiohttp
 
-from crawler.semaphore_manager import SemaphoreManager
-from crawler.html_parser import HTMLParser
 from crawler.crawler_queue import CrawlerQueue
+from crawler.html_parser import HTMLParser
+from crawler.semaphore_manager import SemaphoreManager
+from crawler.url_filter import URLFilter
 
 
 class AsyncCrawler:
@@ -112,10 +113,20 @@ class AsyncCrawler:
         self.failed_urls.clear()
         self.processed_urls.clear()
 
-        queue = CrawlerQueue(start_urls, max_pages=max_pages, max_depth=max_depth,)
+        url_filter = URLFilter(
+            same_domain_only=self.same_domain_only,
+            allowed_hosts=start_urls,
+            include_patterns=self.include_patterns,
+            exclude_patterns=self.exclude_patterns,
+        )
+        queue = CrawlerQueue(
+            start_urls,
+            max_pages=max_pages,
+            max_depth=max_depth,
+            url_filter=url_filter,
+        )
         start = time.monotonic()
         self._print_progress(queue, start=start)
-        pages: list[dict] = []
 
         async def worker() -> None:
             while True:

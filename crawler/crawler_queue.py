@@ -20,7 +20,7 @@ class CrawlerQueue:
         if max_pages is not None and max_pages < 1:
             raise ValueError("max_pages must be >= 1")
         if max_depth is not None and max_depth < 0:
-            raise ValueError("max_depth must br >= 0")
+            raise ValueError("max_depth must be >= 0")
 
         self.max_pages = max_pages
         self.max_depth = max_depth
