@@ -1,14 +1,17 @@
 """Base async HTTP crawler with concurrency control."""
 
 from __future__ import annotations
-from crawler.semaphore_manager import SemaphoreManager
-from crawler.html_parser import HTMLParser
-from crawler.crawler_queue import CrawlerQueue
 
+import sys
+import time
 import asyncio
 from typing import Optional
 
 import aiohttp
+
+from crawler.semaphore_manager import SemaphoreManager
+from crawler.html_parser import HTMLParser
+from crawler.crawler_queue import CrawlerQueue
 
 
 class AsyncCrawler:
@@ -17,6 +20,18 @@ class AsyncCrawler:
     Concurrency is limited by an asyncio.Semaphore so at most
     ``max_concurrent`` requests run at the same time.
     """
+    def _print_progress(self, queue: CrawlerQueue, *, start: float) -> None:
+        stats = queue.get_stats()
+        processed = stats["processed"]
+        pending = stats["pending"]
+        errors = stats["failed"]
+        elapsed = time.monotonic() - start
+        speed = processed / elapsed if elapsed > 0 else 0.0
+        line = (
+            f"processed={processed}  queue={pending}  "
+            f"errors={errors}  speed={speed:.2f} pages/s"
+        )
+        print(f"\r{line:<80}", end="", file=sys.stderr, flush=True)
 
     def __init__(
         self,
@@ -98,6 +113,8 @@ class AsyncCrawler:
         self.processed_urls.clear()
 
         queue = CrawlerQueue(start_urls, max_pages=max_pages, max_depth=max_depth,)
+        start = time.monotonic()
+        self._print_progress(queue, start=start)
         pages: list[dict] = []
 
         async def worker() -> None:
@@ -118,13 +135,17 @@ class AsyncCrawler:
                     queue.mark_processed(url)
                     self.processed_urls[url] = page
                     for link in page.get("links") or []:
-                       queue.add_url(link, depth=depth + 1)
+                        queue.add_url(link, depth=depth + 1)
                 except Exception as exc:
                     queue.mark_failed(url, f"{type(exc).__name__}: {exc}")
                     self.failed_urls[url] = f"{type(exc).__name__}: {exc}"
+                self._print_progress(queue, start=start)
 
         workers = max(1, min(self.max_concurrent, max_pages))
         await asyncio.gather(*(worker() for _ in range(workers)))
+        self._print_progress(queue, start=start)
+        print(file=sys.stderr)
+
         return self.processed_urls
 
     async def close(self) -> None:
