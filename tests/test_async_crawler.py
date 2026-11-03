@@ -26,13 +26,33 @@ def test_init_rejects_non_positive_per_domain() -> None:
         AsyncCrawler(max_per_domain=0)
 
 
+def test_init_rejects_non_positive_timeouts() -> None:
+    with pytest.raises(ValueError):
+        AsyncCrawler(connect_timeout=0)
+    with pytest.raises(ValueError):
+        AsyncCrawler(read_timeout=-1)
+    with pytest.raises(ValueError):
+        AsyncCrawler(pool_limit=0)
+
+
 @pytest.mark.asyncio
-async def test_session_is_created_and_closed() -> None:
-    crawler = AsyncCrawler(max_concurrent=3)
+async def test_session_uses_timeouts_and_pool() -> None:
+    crawler = AsyncCrawler(
+        max_concurrent=3,
+        connect_timeout=1.5,
+        read_timeout=2.5,
+        total_timeout=4.0,
+        pool_limit=20,
+        pool_limit_per_host=3,
+    )
     session = await crawler._get_session()
     try:
         assert isinstance(session, aiohttp.ClientSession)
-        assert session.closed is False
+        assert session.timeout.connect == 1.5
+        assert session.timeout.sock_read == 2.5
+        assert session.timeout.total == 4.0
+        assert session.connector.limit == 20
+        assert session.connector.limit_per_host == 3
     finally:
         await crawler.close()
     assert crawler._session is None
@@ -139,4 +159,38 @@ async def test_fetch_and_parse_uses_parser(crawler: AsyncCrawler) -> None:
     page = await crawler.fetch_and_parse("https://a.test")
     assert page["url"] == "https://a.test"
     assert page["title"] == "Hi"
+    await crawler.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_logs_start_and_success(
+    crawler: AsyncCrawler, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = FakeSession({"https://a.test": FakeResponse("hello")})
+    crawler._session = session  # type: ignore[assignment]
+    with caplog.at_level("INFO", logger="crawler.async_crawler"):
+        await crawler.fetch_url("https://a.test")
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Fetching https://a.test" in msg for msg in messages)
+    assert any("Fetched https://a.test (5 bytes)" in msg for msg in messages)
+    await crawler.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_logs_error_type(
+    crawler: AsyncCrawler, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = FakeSession(
+        {"https://bad.test": FakeResponse("nope", status=404, url="https://bad.test")}
+    )
+    crawler._session = session  # type: ignore[assignment]
+    with caplog.at_level("INFO", logger="crawler.async_crawler"):
+        with pytest.raises(aiohttp.ClientResponseError):
+            await crawler.fetch_url("https://bad.test")
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Fetching https://bad.test" in msg for msg in messages)
+    assert any(
+        "HTTP error fetching https://bad.test [ClientResponseError]" in msg
+        for msg in messages
+    )
     await crawler.close()

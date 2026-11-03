@@ -12,10 +12,11 @@ Public classes: `AsyncCrawler`, `HTMLParser`, `CrawlerQueue`, `URLFilter`,
 | Piece | Role |
 |---|---|
 | `SemaphoreManager` | Global + per-domain in-flight request limit |
+| `ClientTimeout` / `TCPConnector` | Connect/read/total timeouts and connection pool |
 | `CrawlerQueue` | Pending URLs, priority, depth, seen/processed/failed |
 | `URLFilter` | `same_domain_only`, include (whitelist), exclude (blacklist) |
-| `fetch_url(url) -> str` | GET one page |
-| `fetch_urls(urls) -> dict[str, str]` | Parallel GET; skip failures |
+| `fetch_url(url) -> str` | GET one page; log start/success/error type; raise HTTP/timeout/network |
+| `fetch_urls(urls) -> dict[str, str]` | Parallel GET; skip those errors |
 | `fetch_and_parse(url) -> dict` | Fetch + parse into the page dict |
 | `crawl(start_urls, max_pages, max_depth=)` | Walk links; fill visited/processed/failed |
 | `HTMLParser.parse_html(html, url)` | Same dict from raw HTML |
@@ -25,6 +26,10 @@ Page dict: `{url, title, text, links, link_details, metadata, images, headings, 
 
 `crawl` prints live progress on stderr: processed count, queue size, errors,
 pages/s.
+
+Logging (`crawler.async_crawler`): start of a URL load, successful complete
+(byte count), errors with URL and exception type (`ClientResponseError`,
+`TimeoutError`, `ClientError`).
 
 ## How to start
 
@@ -81,7 +86,7 @@ python -m pytest -q
 
 | File | Checks |
 |---|---|
-| `tests/test_async_crawler.py` | fetch, errors, concurrency, session close |
+| `tests/test_async_crawler.py` | fetch, timeouts, pool, logging, concurrency, session close |
 | `tests/test_html_parser.py` | page dict, links, extras, parse errors |
 | `tests/test_crawler_queue.py` | priority, `max_depth`, whitelist/blacklist, no duplicate enqueue |
 | `tests/test_url_filter.py` | same-domain, include/exclude patterns |
