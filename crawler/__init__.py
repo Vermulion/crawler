@@ -5,6 +5,7 @@ from crawler.crawler_queue import CrawlerQueue
 from crawler.html_parser import HTMLParser
 from crawler.semaphore_manager import SemaphoreManager
 from crawler.url_filter import URLFilter
+from crawler.rate_limiter import RateLimiter
 
 __all__ = [
     "AsyncCrawler",
@@ -12,4 +13,5 @@ __all__ = [
     "HTMLParser",
     "SemaphoreManager",
     "URLFilter",
+    "RateLimiter"
 ]

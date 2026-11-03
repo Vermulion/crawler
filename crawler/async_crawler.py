@@ -14,6 +14,7 @@ from crawler.crawler_queue import CrawlerQueue
 from crawler.html_parser import HTMLParser
 from crawler.semaphore_manager import SemaphoreManager
 from crawler.url_filter import URLFilter
+from crawler.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class AsyncCrawler:
         same_domain_only: bool = True,
         include_patterns: Optional[list[str]] = None,
         exclude_patterns: Optional[list[str]] = None,
+        requests_per_second: float = 1.0,
+        rate_limit_per_domain: bool = True
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
@@ -62,6 +65,12 @@ class AsyncCrawler:
             max_global=max_concurrent,
             max_per_domain=max_per_domain,
         )
+        self.requests_per_second = requests_per_second
+        self.rate_limit_per_domain = rate_limit_per_domain
+        self.rate_limiter = RateLimiter(
+            requests_per_second=requests_per_second,
+            per_domain=rate_limit_per_domain,
+        )        
         self.parser = HTMLParser()
         self.visited_urls: set[str] = set()
         self.failed_urls: dict[str, str] = {}
@@ -116,6 +125,7 @@ class AsyncCrawler:
             Network-level failures (DNS, connection reset, etc.).
         """
         session = await self._get_session()
+        await self.rate_limiter.acquire(SemaphoreManager._host(url))
         async with self.limiter.limit(url):
             logger.info("Fetching %s", url)
             try:
