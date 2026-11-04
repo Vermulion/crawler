@@ -34,14 +34,15 @@ class RateLimiter:
             return "_global"
         return (domain or "").strip().lower() or "_global"
 
-    async def acquire(self, domain: str = None) -> None:
+    async def acquire(self, domain: str = None, *, min_interval: float = 0.0) -> None:
         """Block until this domain (or the global clock) may send a request."""
         key = self._key(domain)
         lock = await self._lock_for(key)
         async with lock:
             now = time.monotonic()
             last = self._last.get(key, 0.0)
-            wait = self._interval - (now - last)
+            gap = max(self._interval, min_interval)
+            wait = gap - (now - last)
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last[key] = time.monotonic()

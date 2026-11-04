@@ -15,6 +15,7 @@ from crawler.html_parser import HTMLParser
 from crawler.semaphore_manager import SemaphoreManager
 from crawler.url_filter import URLFilter
 from crawler.rate_limiter import RateLimiter
+from crawler.robots_parser import RobotsDenied, RobotsParser
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,10 @@ class AsyncCrawler:
             requests_per_second=requests_per_second,
             per_domain=rate_limit_per_domain,
         )        
+        self.user_agent = "AsyncCrawler"
+        self.robots = RobotsParser()
+        self.blocked_urls: set[str] = set()
+        self._robots_lock = asyncio.Lock()
         self.parser = HTMLParser()
         self.visited_urls: set[str] = set()
         self.failed_urls: dict[str, str] = {}
@@ -112,6 +117,32 @@ class AsyncCrawler:
             )
         return self._session
 
+    async def _ensure_robots(self, url: str) -> None:
+        """Download robots.txt once per origin, through the crawler's session."""
+        origin = self.robots._origin(url)
+        if origin in self.robots._cache:
+            return
+        async with self._robots_lock:
+            if origin in self.robots._cache:
+                return
+            robots_url = origin + "/robots.txt"
+            session = await self._get_session()
+            host = SemaphoreManager._host(robots_url)
+            await self.rate_limiter.acquire(host)
+            try:
+                async with session.get(robots_url) as response:
+                    status = response.status
+                    text = await response.text()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "Could not read %s [%s]; treating it as allow-all",
+                    robots_url,
+                    type(exc).__name__,
+                )
+                self.robots.store(url, 404, "")
+                return
+            self.robots.store(url, status, text)
+
     async def fetch_url(self, url: str) -> str:
         """Load a single page and return its response body as text.
 
@@ -125,7 +156,16 @@ class AsyncCrawler:
             Network-level failures (DNS, connection reset, etc.).
         """
         session = await self._get_session()
-        await self.rate_limiter.acquire(SemaphoreManager._host(url))
+        await self._ensure_robots(url)
+        if not self.robots.can_fetch(url, self.user_agent):
+            self.blocked_urls.add(url)
+            logger.warning("Blocked by robots.txt: %s", url)
+            raise RobotsDenied(url)
+        delay = self.robots.get_crawl_delay(url, self.user_agent)
+        await self.rate_limiter.acquire(
+            SemaphoreManager._host(url),
+            min_interval=delay,
+        )
         async with self.limiter.limit(url):
             logger.info("Fetching %s", url)
             try:
@@ -171,7 +211,7 @@ class AsyncCrawler:
             try:
                 body = await self.fetch_url(url)
                 return url, body
-            except (aiohttp.ClientResponseError, asyncio.TimeoutError, aiohttp.ClientError):
+            except (aiohttp.ClientResponseError, asyncio.TimeoutError, aiohttp.ClientError,):
                 return url, None
 
         results = await asyncio.gather(*(_safe_fetch(url) for url in urls))
@@ -194,6 +234,7 @@ class AsyncCrawler:
             raise ValueError("max_pages must be >= 1")
 
         self.visited_urls.clear()
+        self.blocked_urls.clear()
         self.failed_urls.clear()
         self.processed_urls.clear()
 
@@ -233,6 +274,7 @@ class AsyncCrawler:
                     aiohttp.ClientResponseError,
                     asyncio.TimeoutError,
                     aiohttp.ClientError,
+                    RobotsDenied,
                 ) as exc:
                     queue.mark_failed(url, f"{type(exc).__name__}: {exc}")
                     self.failed_urls[url] = f"{type(exc).__name__}: {exc}"
