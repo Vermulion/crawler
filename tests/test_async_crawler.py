@@ -10,10 +10,13 @@ import pytest
 from crawler import AsyncCrawler
 from tests.http_fakes import FakeResponse, FakeSession
 
+# Keep Day-1 tests fast; politeness sleeps are covered in test_rate_limiter / test_politeness.
+_FAST = dict(requests_per_second=1000.0, min_delay=0.0, jitter=0.0)
+
 
 @pytest.fixture
 def crawler() -> AsyncCrawler:
-    return AsyncCrawler(max_concurrent=2)
+    return AsyncCrawler(max_concurrent=2, **_FAST)
 
 
 def test_init_rejects_non_positive() -> None:
@@ -37,8 +40,9 @@ def test_init_rejects_non_positive_timeouts() -> None:
 
 @pytest.mark.asyncio
 async def test_session_uses_timeouts_and_pool() -> None:
-    crawler = AsyncCrawler(
+    crawler =         AsyncCrawler(
         max_concurrent=3,
+        requests_per_second=1000.0,
         connect_timeout=1.5,
         read_timeout=2.5,
         total_timeout=4.0,
@@ -124,14 +128,14 @@ async def test_fetch_urls_skips_http_timeout_and_network_errors(crawler: AsyncCr
 
 @pytest.mark.asyncio
 async def test_fetch_urls_empty() -> None:
-    crawler = AsyncCrawler()
+    crawler = AsyncCrawler(**_FAST)
     assert await crawler.fetch_urls([]) == {}
     await crawler.close()
 
 
 @pytest.mark.asyncio
 async def test_concurrency_limit() -> None:
-    crawler = AsyncCrawler(max_concurrent=2)
+    crawler = AsyncCrawler(max_concurrent=2, **_FAST)
     urls = [f"https://n{i}.test" for i in range(5)]
     session = FakeSession({u: FakeResponse("x") for u in urls}, delay=0.05)
     crawler._session = session  # type: ignore[assignment]
@@ -142,7 +146,7 @@ async def test_concurrency_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_context_manager_closes_session() -> None:
-    crawler = AsyncCrawler()
+    crawler = AsyncCrawler(**_FAST)
     session = FakeSession({})
     crawler._session = session  # type: ignore[assignment]
     async with crawler:

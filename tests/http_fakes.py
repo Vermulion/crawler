@@ -45,11 +45,13 @@ class FakeSession:
         self.errors = errors or {}
         self.closed = False
         self.calls: list[str] = []
+        self.request_headers: list[dict] = []
         self.inflight = 0
         self.max_inflight = 0
 
-    def get(self, url: str) -> "_DelayedResponse":
+    def get(self, url: str, headers=None, **kwargs) -> "_DelayedResponse":
         self.calls.append(url)
+        self.request_headers.append(dict(headers or {}))
         return _DelayedResponse(self, url)
 
     async def close(self) -> None:

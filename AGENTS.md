@@ -23,31 +23,36 @@ Python async HTTP crawler using **aiohttp**. Package lives in `crawler/`.
 
 ```
 crawler/                 # importable package
-  __init__.py            # AsyncCrawler, HTMLParser, CrawlerQueue, URLFilter, SemaphoreManager
+  __init__.py            # AsyncCrawler, HTMLParser, CrawlerQueue, URLFilter,
+                         # SemaphoreManager, RateLimiter, RobotsParser, RobotsDenied
   async_crawler.py       # HTTP + crawl loop
   html_parser.py         # HTMLParser (BeautifulSoup)
   crawler_queue.py       # CrawlerQueue
   url_filter.py          # URLFilter
   semaphore_manager.py   # global + per-domain semaphores
+  rate_limiter.py        # requests_per_second, min_delay, jitter
+  robots_parser.py       # robots.txt cache, can_fetch, crawl-delay
 tests/                   # pytest (no network)
 examples/
   fetch_example.py
   parallel_demo.py
   parse_demo.py
   crawl_demo.py          # live crawl + crawl_results.json
+  polite_demo.py         # rate limit + robots.txt + delay stats
 requirements.txt
 requirements-dev.txt
 ```
 
 ## Current API
 
-`AsyncCrawler(max_concurrent=10, max_per_domain=2, *, connect_timeout=10, read_timeout=30, total_timeout=60, pool_limit=100, pool_limit_per_host=max_concurrent, same_domain_only=True, include_patterns=None, exclude_patterns=None)`
+`AsyncCrawler(max_concurrent=10, max_per_domain=2, *, connect_timeout=10, read_timeout=30, total_timeout=60, pool_limit=100, pool_limit_per_host=max_concurrent, same_domain_only=True, include_patterns=None, exclude_patterns=None, requests_per_second=1.0, rate_limit_per_domain=True, min_delay=0, jitter=0, max_retries=0, backoff_factor=0.5, backoff_max=30, user_agent="AsyncCrawler", user_agents=None)`
 
-- `fetch_url(url: str) -> str` — GET one URL; `SemaphoreManager.limit(url)`; log start/success/error type; re-raise HTTP/timeout/network
-- `fetch_urls(urls: list[str]) -> dict[str, str]` — parallel GET; skip those three error classes
+- `fetch_url(url: str) -> str` — GET one URL; robots.txt; rate limiter; `SemaphoreManager.limit(url)`; log start/success/error type; re-raise HTTP/timeout/network/`RobotsDenied`
+- `fetch_urls(urls: list[str]) -> dict[str, str]` — parallel GET; skip those error classes plus `RobotsDenied`
 - `fetch_and_parse(url: str) -> dict` — fetch then parse
 - `crawl(start_urls, max_pages=100, *, max_depth=None) -> dict[str, dict]` — queue + filters + progress
-- `visited_urls: set[str]`, `processed_urls: dict[str, dict]`, `failed_urls: dict[str, str]`
+- `visited_urls: set[str]`, `processed_urls: dict[str, dict]`, `failed_urls: dict[str, str]`, `blocked_urls: set[str]`
+- `get_speed_stats() -> dict` — `requests_per_second`, `avg_delay`, `blocked`, `requests`
 - `close()` — `await session.close()` then `asyncio.sleep(0)`; also `async with AsyncCrawler() as c`
 
 Session: `ClientTimeout(total, connect, sock_read=read_timeout)` + `TCPConnector(limit, limit_per_host, ttl_dns_cache=300, enable_cleanup_closed=True)`.
@@ -64,18 +69,22 @@ Session: `ClientTimeout(total, connect, sock_read=read_timeout)` + `TCPConnector
 
 `SemaphoreManager(max_global=10, max_per_domain=2)` — `acquire` / `release` / `limit(url)` / `get_stats()`.
 
+`RateLimiter(requests_per_second=1.0, per_domain=True, min_delay=0, jitter=0)` — `acquire(domain, min_interval=0)`.
+
+`RobotsParser` — `fetch_robots` / `store` / `can_fetch` / `get_crawl_delay`. `RobotsDenied` is raised when a URL is disallowed.
+
 `HTMLParser` — `parse_html`, `extract_links` (same-host), `extract_link_details`, text/metadata/images/headings/tables/lists.
 
 Page dict: `{url, title, text, links, link_details, metadata, images, headings, tables, lists}`.
 
-`crawl` builds `URLFilter` from crawler settings and seed hosts, then `CrawlerQueue`. Progress goes to stderr (`processed`, `queue`, `errors`, `pages/s`).
+`crawl` builds `URLFilter` from crawler settings and seed hosts, then `CrawlerQueue`. Progress goes to stderr (`processed`, `queue`, `errors`, `pages/s`, `req/s`, `avg_delay`, `robots_blocked`).
 
 ## Conventions
 
 - Keep public API small and typed.
 - Do not add extra deps unless asked.
 - Failed URLs in `fetch_urls` are omitted, not raised.
-- `fetch_url` logs and re-raises `ClientResponseError`, `TimeoutError`, `ClientError`.
+- `fetch_url` logs and re-raises `ClientResponseError`, `TimeoutError`, `ClientError`, `RobotsDenied`.
 - `crawl` records those errors in `failed_urls`.
 - Tests stay offline (fake session in `tests/http_fakes.py`). Demos may use the network.
 
@@ -86,4 +95,4 @@ Page dict: `{url, title, text, links, link_details, metadata, images, headings, 
 
 ## Next likely steps
 
-Retries, robots.txt, rate limits, user-agent, persistence.
+Persistence, robots.txt refresh, configurable respect_robots flag.

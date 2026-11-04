@@ -22,6 +22,9 @@ async def _crawl_with_pages(
     max_depth: int | None = None,
     **crawler_kw,
 ) -> tuple[AsyncCrawler, FakeSession]:
+    crawler_kw.setdefault("requests_per_second", 1000.0)
+    crawler_kw.setdefault("min_delay", 0.0)
+    crawler_kw.setdefault("jitter", 0.0)
     crawler = AsyncCrawler(max_concurrent=2, **crawler_kw)
     session = FakeSession(mapping)
     crawler._session = session  # type: ignore[assignment]

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crawler"
 version = "0.1.0"
-description = "Async HTTP crawler with queue, URL filters, and concurrency limits"
+description = "Async HTTP crawler with queue, URL filters, rate limits, and robots.txt"
 requires-python = ">=3.9"
 dependencies = [
     "aiohttp>=3.9.0,<4.0.0",
