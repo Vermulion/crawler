@@ -250,7 +250,7 @@ class _FakeSession:
     def __init__(self, html: str) -> None:
         self.html = html
 
-    def get(self, url: str) -> _FakeCM:
+    def get(self, url: str, headers=None, **kwargs) -> _FakeCM:
         return _FakeCM(_FakeResponse(self.html))
 
     async def close(self) -> None:
@@ -259,7 +259,7 @@ class _FakeSession:
 
 @pytest.mark.asyncio
 async def test_fetch_and_parse_uses_parser() -> None:
-    crawler = AsyncCrawler()
+    crawler = AsyncCrawler(requests_per_second=1000.0)
     crawler._session = _FakeSession(SAMPLE_HTML)  # type: ignore[assignment]
     page = await crawler.fetch_and_parse(BASE_URL)
     assert page["url"] == BASE_URL

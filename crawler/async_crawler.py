@@ -294,7 +294,12 @@ class AsyncCrawler:
             try:
                 body = await self.fetch_url(url)
                 return url, body
-            except (aiohttp.ClientResponseError, asyncio.TimeoutError, aiohttp.ClientError,):
+            except (
+                aiohttp.ClientResponseError,
+                asyncio.TimeoutError,
+                aiohttp.ClientError,
+                RobotsDenied,
+            ):
                 return url, None
 
         results = await asyncio.gather(*(_safe_fetch(url) for url in urls))
