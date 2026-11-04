@@ -51,6 +51,8 @@ class AsyncCrawler:
         max_retries: int = 0,
         backoff_factor: float = 0.5,
         backoff_max: float = 30.0,
+        user_agent: str = "AsyncCrawler",
+        user_agents: Optional[list[str]] = None,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
@@ -82,7 +84,16 @@ class AsyncCrawler:
         )
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
-        self.backoff_max = backoff_max
+        if user_agents:
+            names = [name.strip() for name in user_agents if name and name.strip()]
+        else:
+            names = [user_agent.strip()] if user_agent.strip() else []
+        if not names:
+            raise ValueError("user_agent must not be empty")
+        self.user_agents = names
+        self.user_agent = names[0]
+        self._agent_index = 0
+        self._agent_lock = asyncio.Lock()
         self.jitter = jitter
         self.user_agent = "AsyncCrawler"
         self.robots = RobotsParser()
@@ -129,7 +140,7 @@ class AsyncCrawler:
             )
         return self._session
 
-    async def _ensure_robots(self, url: str) -> None:
+    async def _ensure_robots(self, url: str, user_agent: str) -> None:
         """Download robots.txt once per origin, through the crawler's session."""
         origin = self.robots._origin(url)
         if origin in self.robots._cache:
@@ -142,7 +153,10 @@ class AsyncCrawler:
             host = SemaphoreManager._host(robots_url)
             await self.rate_limiter.acquire(host)
             try:
-                async with session.get(robots_url) as response:
+                async with session.get(
+                    robots_url,
+                    headers={"User-Agent": user_agent},
+                ) as response:
                     status = response.status
                     text = await response.text()
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -154,6 +168,13 @@ class AsyncCrawler:
                 self.robots.store(url, 404, "")
                 return
             self.robots.store(url, status, text)
+
+    async def _next_user_agent(self) -> str:
+        """Return the next User-Agent. One name stays that name."""
+        async with self._agent_lock:
+            agent = self.user_agents[self._agent_index % len(self.user_agents)]
+            self._agent_index += 1
+            return agent
 
     def _backoff_delay(self, attempt: int) -> float:
         """Wait after failure number attempt. attempt 0 -> factor, then double."""
@@ -187,12 +208,13 @@ class AsyncCrawler:
             Network-level failures (DNS, connection reset, etc.).
         """
         session = await self._get_session()
-        await self._ensure_robots(url)
-        if not self.robots.can_fetch(url, self.user_agent):
+        agent = await self._next_user_agent()
+        await self._ensure_robots(url, agent)
+        if not self.robots.can_fetch(url, agent):
             self.blocked_urls.add(url)
-            logger.warning("Blocked by robots.txt: %s", url)
+            logger.warning("Blocked by robots.txt: %s [%s]", url, agent)
             raise RobotsDenied(url)
-        delay = self.robots.get_crawl_delay(url, self.user_agent)
+        delay = self.robots.get_crawl_delay(url, agent)
         attempt = 0
         while True:
             await self.rate_limiter.acquire(
@@ -202,7 +224,7 @@ class AsyncCrawler:
             async with self.limiter.limit(url):
                 logger.info("Fetching %s", url)
                 try:
-                    async with session.get(url) as response:
+                    async with session.get(url, headers={"User-Agent": agent}) as response:
                         response.raise_for_status()
                         body = await response.text()
                     logger.info("Fetched %s (%d bytes)", url, len(body))
