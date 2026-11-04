@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import random
 from typing import Optional
 
 
@@ -11,10 +12,16 @@ class RateLimiter:
         self,
         requests_per_second: float = 1.0,
         per_domain: bool = True,
+        min_delay: float = 0.0,
+        jitter: float = 0.0,
     ) -> None:
         if requests_per_second <= 0:
             raise ValueError("requests_per_second must be > 0")
-
+        if min_delay < 0 or jitter < 0:
+            raise ValueError("min_delay and jitter must be >= 0")
+            
+        self.min_delay = min_delay
+        self.jitter = jitter
         self.requests_per_second = requests_per_second
         self.per_domain = per_domain
         self._interval = 1.0 / requests_per_second
@@ -41,8 +48,12 @@ class RateLimiter:
         async with lock:
             now = time.monotonic()
             last = self._last.get(key, 0.0)
-            gap = max(self._interval, min_interval)
+            gap = max(self._interval, min_interval, self.min_delay)
             wait = gap - (now - last)
+            if wait < 0:
+                wait = 0.0
+            if self.jitter > 0:
+                wait += random.uniform(0, self.jitter)
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last[key] = time.monotonic()
