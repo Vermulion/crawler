@@ -95,9 +95,11 @@ class AsyncCrawler:
         self._agent_index = 0
         self._agent_lock = asyncio.Lock()
         self.jitter = jitter
-        self.user_agent = "AsyncCrawler"
         self.robots = RobotsParser()
         self.blocked_urls: set[str] = set()
+        self._request_times: list[float] = []
+        self._requests_done = 0
+        self._stats_start = time.monotonic()
         self._robots_lock = asyncio.Lock()
         self.parser = HTMLParser()
         self.visited_urls: set[str] = set()
@@ -115,11 +117,31 @@ class AsyncCrawler:
         errors = stats["failed"]
         elapsed = time.monotonic() - start
         speed = processed / elapsed if elapsed > 0 else 0.0
+        extra = self.get_speed_stats()
         line = (
             f"processed={processed}  queue={pending}  "
-            f"errors={errors}  speed={speed:.2f} pages/s"
+            f"errors={errors}  speed={speed:.2f} pages/s  "
+            f"req/s={extra['requests_per_second']:.2f}  "
+            f"avg_delay={extra['avg_delay']:.2f}s  "
+            f"robots_blocked={extra['blocked']}"
         )
         print(f"\r{line:<80}", end="", file=sys.stderr, flush=True)
+
+    def get_speed_stats(self) -> dict:
+        elapsed = time.monotonic() - self._stats_start
+        speed = self._requests_done / elapsed if elapsed > 0 else 0.0
+        times = self._request_times
+        if len(times) >= 2:
+            gaps = [times[i] - times[i - 1] for i in range(1, len(times))]
+            avg_delay = sum(gaps) / len(gaps)
+        else:
+            avg_delay = 0.0
+        return {
+            "requests_per_second": speed,
+            "avg_delay": avg_delay,
+            "blocked": len(self.blocked_urls),
+            "requests": self._requests_done,
+        }
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -221,6 +243,8 @@ class AsyncCrawler:
                 SemaphoreManager._host(url),
                 min_interval=delay,
             )
+            started = time.monotonic()
+            self._request_times.append(started)
             async with self.limiter.limit(url):
                 logger.info("Fetching %s", url)
                 try:
@@ -253,6 +277,8 @@ class AsyncCrawler:
                     pause = self._backoff_delay(attempt)
                     logger.info("Retrying %s in %.2fs", url, pause)
                     attempt += 1
+                finally:
+                    self._requests_done += 1
             await asyncio.sleep(pause)
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
@@ -292,6 +318,9 @@ class AsyncCrawler:
 
         self.visited_urls.clear()
         self.blocked_urls.clear()
+        self._request_times.clear()
+        self._requests_done = 0
+        self._stats_start = time.monotonic()
         self.failed_urls.clear()
         self.processed_urls.clear()
 
