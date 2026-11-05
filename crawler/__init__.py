@@ -7,6 +7,7 @@ from crawler.rate_limiter import RateLimiter
 from crawler.robots_parser import RobotsDenied, RobotsParser
 from crawler.semaphore_manager import SemaphoreManager
 from crawler.url_filter import URLFilter
+from crawler.retry_strategy import RetryStrategy
 
 __all__ = [
     "AsyncCrawler",
@@ -17,4 +18,5 @@ __all__ = [
     "RobotsParser",
     "SemaphoreManager",
     "URLFilter",
+    "RetryStratagy",
 ]
