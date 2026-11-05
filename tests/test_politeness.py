@@ -133,3 +133,24 @@ async def test_rate_limit_several_domains_are_independent() -> None:
     )
     assert time.monotonic() - t0 < 0.35
     await crawler.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_uses_saved_backoff_max() -> None:
+    pages = _pages("https://a.test/slow")
+    session = FakeSession(
+        pages,
+        errors={"https://a.test/slow": asyncio.TimeoutError()},
+    )
+    crawler = _crawler(
+        session,
+        max_retries=1,
+        backoff_factor=0.05,
+        backoff_max=30.0,
+        jitter=0.0,
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await crawler.fetch_url("https://a.test/slow")
+    assert session.calls.count("https://a.test/slow") == 2
+    assert crawler.backoff_max == 30.0
+    await crawler.close()

@@ -84,6 +84,7 @@ class AsyncCrawler:
         )
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
+        self.backoff_max = backoff_max
         if user_agents:
             names = [name.strip() for name in user_agents if name and name.strip()]
         else:
