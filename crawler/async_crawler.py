@@ -232,6 +232,38 @@ class AsyncCrawler:
         total = max(total, connect, read)
         return aiohttp.ClientTimeout(total=total, connect=connect, sock_read=read)
 
+    def _record(
+        self,
+        url: str,
+        *,
+        error: str | None,
+        attempt: int,
+        retry: bool,
+        retry_in: float | None,
+        result: str,
+        status: int | None = None,
+        message: str = "",
+    ) -> None:
+        row = {
+            "url": url,
+            "error": error,
+            "attempt": attempt,
+            "retry": retry,
+            "retry_in": retry_in,
+            "result": result,
+            "status": status,
+            "message": message,
+        }
+        self.error_log.append(row)
+        log = logger.info if result == "success" else logger.warning
+        log(
+            "url=%s error=%s attempt=%s retry_in=%s result=%s",
+            url,
+            error,
+            attempt,
+            retry_in,
+            result,
+        )
     async def fetch_url(self, url: str) -> str:
         """Load a single page and return its response body as text.
 
@@ -259,15 +291,14 @@ class AsyncCrawler:
             logger.warning("Circuit open for %s; skipping %s", host, url)
             err = CircuitOpenError(f"circuit open for {host}", url=url)
             self.failed_urls[url] = f"{type(err).__name__}: {err}"
-            self.error_log.append(
-                {
-                    "url": url,
-                    "attempt": 0,
-                    "error": "CircuitOpenError",
-                    "message": str(err),
-                    "status": None,
-                    "retry": False,
-                }
+            self._record(
+                url,
+                error="CircuitOpenError",
+                attempt=0,
+                retry=False,
+                retry_in=None,
+                result="failure",
+                message=str(err),
             )
             raise err
         tries = {"n": 0}
@@ -307,24 +338,18 @@ class AsyncCrawler:
                     will_retry = n <= self.retry_strategy.extra_retries_for(
                         err
                     ) and self.retry_strategy.should_retry(err)
-                    self.error_log.append(
-                        {
-                            "url": url,
-                            "attempt": n,
-                            "error": type(err).__name__,
-                            "message": str(err),
-                            "status": err.status,
-                            "retry": will_retry,
-                        }
+                    retry_in = (
+                        self.retry_strategy._delay(n - 1, err) if will_retry else None
                     )
-                    logger.warning(
-                        "Fetch failed %s try=%d/%d [%s]: %s retry=%s",
+                    self._record(
                         url,
-                        n,
-                        total,
-                        type(err).__name__,
-                        err,
-                        will_retry,
+                        error=type(err).__name__,
+                        attempt=n,
+                        retry=will_retry,
+                        retry_in=retry_in,
+                        result="retry" if will_retry else "failure",
+                        status=err.status,
+                        message=str(err),
                     )
                     raise err
                 finally:
@@ -340,6 +365,15 @@ class AsyncCrawler:
             self.failed_urls[url] = f"{type(exc).__name__}: {exc}"
             raise
         self.circuit_breaker.record_success(host)
+        if any(row["url"] == url and row["result"] == "retry" for row in self.error_log):
+            self._record(
+                url,
+                error=None,
+                attempt=tries["n"],
+                retry=False,
+                retry_in=None,
+                result="success",
+            )
         return body
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:

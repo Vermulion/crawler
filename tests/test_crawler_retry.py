@@ -203,4 +203,40 @@ async def test_timeout_error_is_network_and_retried(
     assert page_timeouts[1] == 4.0
     assert page_timeouts[2] == 8.0
     assert crawler.error_log[0]["error"] == "NetworkError"
+    assert crawler.error_log[-1]["result"] == "failure"
+    assert crawler.error_log[-1]["retry_in"] is None
+    assert crawler.error_log[0]["retry_in"] == pytest.approx(0.01)
+    await crawler.close()
+
+@pytest.mark.asyncio
+async def test_error_log_has_delay_and_final_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("crawler.retry_strategy.asyncio.sleep", no_sleep)
+    url = "https://a.test/flaky"
+    session = FakeSession(
+        {
+            url: FakeResponse("ok", url=url),
+            "https://a.test/robots.txt": FakeResponse("User-agent: *\nAllow: /"),
+        },
+        errors={url: asyncio.TimeoutError()},
+        fail_counts={url: 2},
+    )
+    crawler = _crawler(session, max_retries=3, backoff_factor=2.0)
+    body = await crawler.fetch_url(url)
+    assert body == "ok"
+    rows = [r for r in crawler.error_log if r["url"] == url]
+    assert rows[0]["error"] == "NetworkError"
+    assert rows[0]["attempt"] == 1
+    assert rows[0]["retry_in"] == 2.0
+    assert rows[0]["result"] == "retry"
+    assert rows[1]["attempt"] == 2
+    assert rows[1]["retry_in"] == 4.0
+    assert rows[1]["result"] == "retry"
+    assert rows[2]["result"] == "success"
+    assert rows[2]["retry_in"] is None
+    assert rows[2]["error"] is None
     await crawler.close()

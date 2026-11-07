@@ -39,6 +39,7 @@ class FakeSession:
         mapping: dict[str, FakeResponse],
         delay: float = 0.0,
         errors: dict[str, BaseException] | None = None,
+        fail_counts: dict[str, int] | None = None,
     ) -> None:
         self.mapping = mapping
         self.delay = delay
@@ -49,6 +50,7 @@ class FakeSession:
         self.inflight = 0
         self.max_inflight = 0
         self.request_timeouts: list = []
+        self.fail_counts = dict(fail_counts or {})
 
     def get(self, url: str, headers=None, **kwargs) -> "_DelayedResponse":
         self.calls.append(url)
@@ -72,7 +74,12 @@ class _DelayedResponse:
             if self._session.delay:
                 await asyncio.sleep(self._session.delay)
             if self._url in self._session.errors:
-                raise self._session.errors[self._url]
+                left = self._session.fail_counts.get(self._url)
+                if left is None:
+                    raise self._session.errors[self._url]
+                if left > 0:
+                    self._session.fail_counts[self._url] = left - 1
+                    raise self._session.errors[self._url]
             if self._url not in self._session.mapping:
                 raise aiohttp.ClientConnectionError(f"unknown url {self._url}")
             return self._session.mapping[self._url]
