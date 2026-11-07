@@ -147,3 +147,60 @@ async def test_429_waits_longer_than_normal(monkeypatch: pytest.MonkeyPatch) -> 
     assert retry_sleeps == [2.0]
     assert len(retry_sleeps) == 1
     await crawler.close()
+
+def test_timeout_grows_then_caps() -> None:
+    crawler = AsyncCrawler(
+        connect_timeout=10.0,
+        read_timeout=10.0,
+        total_timeout=20.0,
+        timeout_backoff_factor=2.0,
+        timeout_max=50.0,
+        requests_per_second=1000.0,
+    )
+    t0 = crawler._timeout_for_attempt(0)
+    t1 = crawler._timeout_for_attempt(1)
+    t2 = crawler._timeout_for_attempt(5)
+    assert t0.total == 20.0
+    assert t1.total == 40.0
+    assert t1.connect == 20.0
+    assert t2.total == 50.0  # capped, not 20 * 32
+
+
+@pytest.mark.asyncio
+async def test_timeout_error_is_network_and_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("crawler.retry_strategy.asyncio.sleep", no_sleep)
+    url = "https://a.test/slow"
+    session = FakeSession(
+        {
+            url: FakeResponse("ok", url=url),
+            "https://a.test/robots.txt": FakeResponse("User-agent: *\nAllow: /"),
+        },
+        errors={url: asyncio.TimeoutError()},
+    )
+    crawler = _crawler(
+        session,
+        max_retries=2,
+        backoff_factor=0.01,
+        connect_timeout=1.0,
+        read_timeout=1.0,
+        total_timeout=2.0,
+        timeout_backoff_factor=2.0,
+        timeout_max=20.0,
+    )
+    with pytest.raises(NetworkError):
+        await crawler.fetch_url(url)
+    assert session.calls.count(url) == 3
+    page_timeouts = [
+        t.total for t, u in zip(session.request_timeouts, session.calls)
+        if u == url and t is not None
+    ]
+    assert page_timeouts[0] == 2.0
+    assert page_timeouts[1] == 4.0
+    assert page_timeouts[2] == 8.0
+    assert crawler.error_log[0]["error"] == "NetworkError"
+    await crawler.close()

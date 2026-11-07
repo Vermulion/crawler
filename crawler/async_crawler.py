@@ -40,6 +40,8 @@ class AsyncCrawler:
         connect_timeout: float = 10.0,
         read_timeout: float = 30.0,
         total_timeout: float = 60.0,
+        timeout_backoff_factor: float = 2.0,
+        timeout_max: float = 120.0,
         pool_limit: int = _DEFAULT_POOL_LIMIT,
         pool_limit_per_host: Optional[int] = None,
         same_domain_only: bool = True,
@@ -68,6 +70,12 @@ class AsyncCrawler:
         self.connect_timeout = connect_timeout
         self.read_timeout = read_timeout
         self.total_timeout = total_timeout
+        if timeout_backoff_factor <= 0:
+            raise ValueError("timeout_backoff_factor must be > 0")
+        if timeout_max <= 0:
+            raise ValueError("timeout_max must be > 0")
+        self.timeout_backoff_factor = timeout_backoff_factor
+        self.timeout_max = timeout_max
         self.pool_limit = pool_limit
         self.pool_limit_per_host = (
             pool_limit_per_host if pool_limit_per_host is not None else max_concurrent
@@ -205,6 +213,15 @@ class AsyncCrawler:
             self._agent_index += 1
             return agent
 
+    def _timeout_for_attempt(self, attempt: int) -> aiohttp.ClientTimeout:
+        """attempt 0 = base timeouts; each retry multiplies, then caps."""
+        grow = self.timeout_backoff_factor ** attempt
+        connect = min(self.connect_timeout * grow, self.timeout_max)
+        read = min(self.read_timeout * grow, self.timeout_max)
+        total = min(self.total_timeout * grow, self.timeout_max)
+        total = max(total, connect, read)
+        return aiohttp.ClientTimeout(total=total, connect=connect, sock_read=read)
+
     async def fetch_url(self, url: str) -> str:
         """Load a single page and return its response body as text.
 
@@ -240,10 +257,16 @@ class AsyncCrawler:
             async with self.limiter.limit(url):
                 n = tries["n"]
                 total = self.retry_strategy.max_retries + 1
-                logger.info("Fetching %s (try %d/%d)", url, n, total)
                 try:
+                    timeout = self._timeout_for_attempt(n - 1)
+                    logger.info(
+                        "Fetching %s (try %d/%d) timeout=%.1fs",
+                        url, n, total, timeout.total or 0.0,
+                    )
                     async with session.get(
-                        url, headers={"User-Agent": agent}
+                        url,
+                        headers={"User-Agent": agent},
+                        timeout=timeout,
                     ) as response:
                         response.raise_for_status()
                         body = await response.text()
@@ -255,10 +278,9 @@ class AsyncCrawler:
                     aiohttp.ClientError,
                 ) as exc:
                     err = classify_exception(exc, url)
-                    will_retry = (
-                        n <= self.retry_strategy.extra_retries_for(err)
-                        and self.retry_strategy.should_retry(err)
-                    )
+                    will_retry = n <= self.retry_strategy.extra_retries_for(
+                        err
+                    ) and self.retry_strategy.should_retry(err)
                     self.error_log.append(
                         {
                             "url": url,

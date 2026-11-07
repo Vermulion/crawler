@@ -48,10 +48,12 @@ class FakeSession:
         self.request_headers: list[dict] = []
         self.inflight = 0
         self.max_inflight = 0
+        self.request_timeouts: list = []
 
     def get(self, url: str, headers=None, **kwargs) -> "_DelayedResponse":
         self.calls.append(url)
         self.request_headers.append(dict(headers or {}))
+        self.request_timeouts.append(kwargs.get("timeout"))
         return _DelayedResponse(self, url)
 
     async def close(self) -> None:
