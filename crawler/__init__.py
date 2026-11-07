@@ -8,6 +8,13 @@ from crawler.robots_parser import RobotsDenied, RobotsParser
 from crawler.semaphore_manager import SemaphoreManager
 from crawler.url_filter import URLFilter
 from crawler.retry_strategy import RetryStrategy
+from crawler.errors import (
+    CrawlerError,
+    NetworkError,
+    ParseError,
+    PermanentError,
+    TransientError,
+)
 
 __all__ = [
     "AsyncCrawler",
@@ -18,5 +25,11 @@ __all__ = [
     "RobotsParser",
     "SemaphoreManager",
     "URLFilter",
-    "RetryStratagy",
+    "RetryStrategy",
+    "CrawlerError",
+    "NetworkError",
+    "ParseError",
+    "PermanentError",
+    "RetryStrategy",
+    "TransientError",
 ]

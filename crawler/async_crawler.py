@@ -256,7 +256,7 @@ class AsyncCrawler:
                 ) as exc:
                     err = classify_exception(exc, url)
                     will_retry = (
-                        n <= self.retry_strategy.max_retries
+                        n <= self.retry_strategy.extra_retries_for(err)
                         and self.retry_strategy.should_retry(err)
                     )
                     self.error_log.append(
