@@ -8,8 +8,11 @@ from crawler.robots_parser import RobotsDenied, RobotsParser
 from crawler.semaphore_manager import SemaphoreManager
 from crawler.url_filter import URLFilter
 from crawler.retry_strategy import RetryStrategy
+from crawler.circuit_breaker import CircuitBreaker
+from crawler.errors import CircuitOpenError
 from crawler.errors import (
     CrawlerError,
+    CircuitOpenError,
     NetworkError,
     ParseError,
     PermanentError,
@@ -32,4 +35,6 @@ __all__ = [
     "PermanentError",
     "RetryStrategy",
     "TransientError",
+    "CircuitOpenError",
+    "CircuitBreaker",
 ]

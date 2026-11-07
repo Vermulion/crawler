@@ -34,6 +34,9 @@ class NetworkError(TransientError):
 class ParseError(CrawlerError):
     """Downloaded bytes are not usable HTML."""
 
+class CircuitOpenError(CrawlerError):
+    """This domain is temporarily blocked by the circuit breaker."""
+
 
 _PERMANENT_HTTP = {401, 403, 404}
 _TRANSIENT_HTTP = {408, 429, 500, 502, 503, 504}

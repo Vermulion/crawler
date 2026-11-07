@@ -16,7 +16,8 @@ from crawler.semaphore_manager import SemaphoreManager
 from crawler.url_filter import URLFilter
 from crawler.rate_limiter import RateLimiter
 from crawler.robots_parser import RobotsDenied, RobotsParser
-from crawler.errors import CrawlerError, TransientError, classify_exception
+from crawler.circuit_breaker import CircuitBreaker
+from crawler.errors import CrawlerError, TransientError, classify_exception, CircuitOpenError
 from crawler.retry_strategy import RetryStrategy
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,10 @@ class AsyncCrawler:
         backoff_factor: float = 0.5,
         backoff_max: float = 30.0,
         retry_strategy: Optional[RetryStrategy] = None,
+        circuit_breaker: Optional[CircuitBreaker] = None,
+        failure_threshold: int = 5,
+        failure_window: float = 60.0,
+        recovery_timeout: float = 30.0,
         user_agent: str = "AsyncCrawler",
         user_agents: Optional[list[str]] = None,
     ) -> None:
@@ -97,6 +102,11 @@ class AsyncCrawler:
             backoff_factor=backoff_factor,
             backoff_max=backoff_max,
             retry_on=[TransientError],
+        )
+        self.circuit_breaker = circuit_breaker or CircuitBreaker(
+            failure_threshold=failure_threshold,
+            failure_window=failure_window,
+            recovery_timeout=recovery_timeout,
         )
         self.error_log: list[dict] = []
         if user_agents:
@@ -244,6 +254,22 @@ class AsyncCrawler:
             logger.warning("Blocked by robots.txt: %s [%s]", url, agent)
             raise RobotsDenied(url)
         delay = self.robots.get_crawl_delay(url, agent)
+        host = SemaphoreManager._host(url)
+        if not self.circuit_breaker.allow(host):
+            logger.warning("Circuit open for %s; skipping %s", host, url)
+            err = CircuitOpenError(f"circuit open for {host}", url=url)
+            self.failed_urls[url] = f"{type(err).__name__}: {err}"
+            self.error_log.append(
+                {
+                    "url": url,
+                    "attempt": 0,
+                    "error": "CircuitOpenError",
+                    "message": str(err),
+                    "status": None,
+                    "retry": False,
+                }
+            )
+            raise err
         tries = {"n": 0}
 
         async def _get_body() -> str:
@@ -305,10 +331,16 @@ class AsyncCrawler:
                     self._requests_done += 1
 
         try:
-            return await self.retry_strategy.execute_with_retry(_get_body)
+            body = await self.retry_strategy.execute_with_retry(_get_body)
+        except TransientError as exc:
+            self.circuit_breaker.record_failure(host)
+            self.failed_urls[url] = f"{type(exc).__name__}: {exc}"
+            raise
         except CrawlerError as exc:
             self.failed_urls[url] = f"{type(exc).__name__}: {exc}"
             raise
+        self.circuit_breaker.record_success(host)
+        return body
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         """Load many URLs in parallel. Returns {url: body} for successful fetches.
@@ -353,6 +385,11 @@ class AsyncCrawler:
         self.failed_urls.clear()
         self.processed_urls.clear()
         self.error_log.clear()
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=self.circuit_breaker.failure_threshold,
+            failure_window=self.circuit_breaker.failure_window,
+            recovery_timeout=self.circuit_breaker.recovery_timeout,
+        )
 
         url_filter = URLFilter(
             same_domain_only=self.same_domain_only,
