@@ -6,8 +6,8 @@ import asyncio
 import logging
 import sys
 import time
-import random
 from typing import Optional
+from collections import Counter
 
 import aiohttp
 
@@ -17,6 +17,9 @@ from crawler.semaphore_manager import SemaphoreManager
 from crawler.url_filter import URLFilter
 from crawler.rate_limiter import RateLimiter
 from crawler.robots_parser import RobotsDenied, RobotsParser
+from crawler.circuit_breaker import CircuitBreaker
+from crawler.errors import CrawlerError, TransientError, classify_exception, CircuitOpenError
+from crawler.retry_strategy import RetryStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,8 @@ class AsyncCrawler:
         connect_timeout: float = 10.0,
         read_timeout: float = 30.0,
         total_timeout: float = 60.0,
+        timeout_backoff_factor: float = 2.0,
+        timeout_max: float = 120.0,
         pool_limit: int = _DEFAULT_POOL_LIMIT,
         pool_limit_per_host: Optional[int] = None,
         same_domain_only: bool = True,
@@ -51,6 +56,11 @@ class AsyncCrawler:
         max_retries: int = 0,
         backoff_factor: float = 0.5,
         backoff_max: float = 30.0,
+        retry_strategy: Optional[RetryStrategy] = None,
+        circuit_breaker: Optional[CircuitBreaker] = None,
+        failure_threshold: int = 5,
+        failure_window: float = 60.0,
+        recovery_timeout: float = 30.0,
         user_agent: str = "AsyncCrawler",
         user_agents: Optional[list[str]] = None,
     ) -> None:
@@ -66,6 +76,12 @@ class AsyncCrawler:
         self.connect_timeout = connect_timeout
         self.read_timeout = read_timeout
         self.total_timeout = total_timeout
+        if timeout_backoff_factor <= 0:
+            raise ValueError("timeout_backoff_factor must be > 0")
+        if timeout_max <= 0:
+            raise ValueError("timeout_max must be > 0")
+        self.timeout_backoff_factor = timeout_backoff_factor
+        self.timeout_max = timeout_max
         self.pool_limit = pool_limit
         self.pool_limit_per_host = (
             pool_limit_per_host if pool_limit_per_host is not None else max_concurrent
@@ -82,9 +98,18 @@ class AsyncCrawler:
             min_delay=min_delay,
             jitter=jitter,
         )
-        self.max_retries = max_retries
-        self.backoff_factor = backoff_factor
-        self.backoff_max = backoff_max
+        self.retry_strategy = retry_strategy or RetryStrategy(
+            max_retries=max_retries,
+            backoff_factor=backoff_factor,
+            backoff_max=backoff_max,
+            retry_on=[TransientError],
+        )
+        self.circuit_breaker = circuit_breaker or CircuitBreaker(
+            failure_threshold=failure_threshold,
+            failure_window=failure_window,
+            recovery_timeout=recovery_timeout,
+        )
+        self.error_log: list[dict] = []
         if user_agents:
             names = [name.strip() for name in user_agents if name and name.strip()]
         else:
@@ -144,6 +169,31 @@ class AsyncCrawler:
             "requests": self._requests_done,
         }
 
+    def get_error_stats(self) -> dict:
+        """Summaries from error_log: types, recovered retries, wait, 4xx URLs."""
+        by_type: Counter[str] = Counter()
+        waits: list[float] = []
+        permanent: set[str] = set()
+        recovered = 0
+        for row in self.error_log:
+            name = row.get("error")
+            if name:
+                by_type[name] += 1
+            if row.get("result") == "success":
+                recovered += 1
+            wait = row.get("retry_in")
+            if wait is not None:
+                waits.append(wait)
+            if name == "PermanentError":
+                permanent.add(row["url"])
+        avg_retry = sum(waits) / len(waits) if waits else 0.0
+        return {
+            "by_type": dict(by_type),
+            "successful_retries": recovered,
+            "avg_retry_time": avg_retry,
+            "permanent_error_urls": sorted(permanent),
+        }
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(
@@ -199,36 +249,60 @@ class AsyncCrawler:
             self._agent_index += 1
             return agent
 
-    def _backoff_delay(self, attempt: int) -> float:
-        """Wait after failure number attempt. attempt 0 -> factor, then double."""
-        delay = self.backoff_factor * (2 ** attempt)
-        if delay > self.backoff_max:
-            delay = self.backoff_max
-        if self.jitter > 0:
-            delay += random.uniform(0, self.jitter)
-        return delay
+    def _timeout_for_attempt(self, attempt: int) -> aiohttp.ClientTimeout:
+        """attempt 0 = base timeouts; each retry multiplies, then caps."""
+        grow = self.timeout_backoff_factor ** attempt
+        connect = min(self.connect_timeout * grow, self.timeout_max)
+        read = min(self.read_timeout * grow, self.timeout_max)
+        total = min(self.total_timeout * grow, self.timeout_max)
+        total = max(total, connect, read)
+        return aiohttp.ClientTimeout(total=total, connect=connect, sock_read=read)
 
-    @staticmethod
-    def _should_retry(exc: BaseException) -> bool:
-        if isinstance(exc, asyncio.TimeoutError):
-            return True
-        if isinstance(exc, aiohttp.ClientResponseError):
-            return exc.status in {429, 500, 502, 503, 504}
-        if isinstance(exc, aiohttp.ClientError):
-            return True
-        return False
-
+    def _record(
+        self,
+        url: str,
+        *,
+        error: str | None,
+        attempt: int,
+        retry: bool,
+        retry_in: float | None,
+        result: str,
+        status: int | None = None,
+        message: str = "",
+    ) -> None:
+        row = {
+            "url": url,
+            "error": error,
+            "attempt": attempt,
+            "retry": retry,
+            "retry_in": retry_in,
+            "result": result,
+            "status": status,
+            "message": message,
+        }
+        self.error_log.append(row)
+        log = logger.info if result == "success" else logger.warning
+        log(
+            "url=%s error=%s attempt=%s retry_in=%s result=%s",
+            url,
+            error,
+            attempt,
+            retry_in,
+            result,
+        )
     async def fetch_url(self, url: str) -> str:
         """Load a single page and return its response body as text.
 
         Raises
         ------
-        aiohttp.ClientResponseError
-            HTTP 4xx/5xx after ``raise_for_status()``.
-        asyncio.TimeoutError
-            Connect, read, or total timeout.
-        aiohttp.ClientError
-            Network-level failures (DNS, connection reset, etc.).
+        TransientError
+            Retryable HTTP (429, 5xx) after retries are used up.
+        NetworkError
+            Timeout or connection failure after retries are used up.
+        PermanentError
+            HTTP 401 / 403 / 404 (and other 4xx). Not retried.
+        RobotsDenied
+            URL is disallowed by robots.txt.
         """
         session = await self._get_session()
         agent = await self._next_user_agent()
@@ -238,8 +312,25 @@ class AsyncCrawler:
             logger.warning("Blocked by robots.txt: %s [%s]", url, agent)
             raise RobotsDenied(url)
         delay = self.robots.get_crawl_delay(url, agent)
-        attempt = 0
-        while True:
+        host = SemaphoreManager._host(url)
+        if not self.circuit_breaker.allow(host):
+            logger.warning("Circuit open for %s; skipping %s", host, url)
+            err = CircuitOpenError(f"circuit open for {host}", url=url)
+            self.failed_urls[url] = f"{type(err).__name__}: {err}"
+            self._record(
+                url,
+                error="CircuitOpenError",
+                attempt=0,
+                retry=False,
+                retry_in=None,
+                result="failure",
+                message=str(err),
+            )
+            raise err
+        tries = {"n": 0}
+
+        async def _get_body() -> str:
+            tries["n"] += 1
             await self.rate_limiter.acquire(
                 SemaphoreManager._host(url),
                 min_interval=delay,
@@ -247,40 +338,69 @@ class AsyncCrawler:
             started = time.monotonic()
             self._request_times.append(started)
             async with self.limiter.limit(url):
-                logger.info("Fetching %s", url)
+                n = tries["n"]
+                total = self.retry_strategy.max_retries + 1
                 try:
-                    async with session.get(url, headers={"User-Agent": agent}) as response:
+                    timeout = self._timeout_for_attempt(n - 1)
+                    logger.info(
+                        "Fetching %s (try %d/%d) timeout=%.1fs",
+                        url, n, total, timeout.total or 0.0,
+                    )
+                    async with session.get(
+                        url,
+                        headers={"User-Agent": agent},
+                        timeout=timeout,
+                    ) as response:
                         response.raise_for_status()
                         body = await response.text()
-                    logger.info("Fetched %s (%d bytes)", url, len(body))
+                    logger.info("Fetched %s (%d bytes) on try %d", url, len(body), n)
                     return body
                 except (
                     aiohttp.ClientResponseError,
                     asyncio.TimeoutError,
                     aiohttp.ClientError,
                 ) as exc:
-                    if isinstance(exc, aiohttp.ClientResponseError):
-                        logger.warning(
-                            "HTTP error fetching %s [%s]: %s",
-                            url, type(exc).__name__, exc,
-                        )
-                    elif isinstance(exc, asyncio.TimeoutError):
-                        logger.warning(
-                            "Timeout fetching %s [%s]", url, type(exc).__name__,
-                        )
-                    else:
-                        logger.warning(
-                            "Network error fetching %s [%s]: %s",
-                            url, type(exc).__name__, exc,
-                        )
-                    if attempt >= self.max_retries or not self._should_retry(exc):
-                        raise
-                    pause = self._backoff_delay(attempt)
-                    logger.info("Retrying %s in %.2fs", url, pause)
-                    attempt += 1
+                    err = classify_exception(exc, url)
+                    will_retry = n <= self.retry_strategy.extra_retries_for(
+                        err
+                    ) and self.retry_strategy.should_retry(err)
+                    retry_in = (
+                        self.retry_strategy._delay(n - 1, err) if will_retry else None
+                    )
+                    self._record(
+                        url,
+                        error=type(err).__name__,
+                        attempt=n,
+                        retry=will_retry,
+                        retry_in=retry_in,
+                        result="retry" if will_retry else "failure",
+                        status=err.status,
+                        message=str(err),
+                    )
+                    raise err
                 finally:
                     self._requests_done += 1
-            await asyncio.sleep(pause)
+
+        try:
+            body = await self.retry_strategy.execute_with_retry(_get_body)
+        except TransientError as exc:
+            self.circuit_breaker.record_failure(host)
+            self.failed_urls[url] = f"{type(exc).__name__}: {exc}"
+            raise
+        except CrawlerError as exc:
+            self.failed_urls[url] = f"{type(exc).__name__}: {exc}"
+            raise
+        self.circuit_breaker.record_success(host)
+        if any(row["url"] == url and row["result"] == "retry" for row in self.error_log):
+            self._record(
+                url,
+                error=None,
+                attempt=tries["n"],
+                retry=False,
+                retry_in=None,
+                result="success",
+            )
+        return body
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         """Load many URLs in parallel. Returns {url: body} for successful fetches.
@@ -295,12 +415,7 @@ class AsyncCrawler:
             try:
                 body = await self.fetch_url(url)
                 return url, body
-            except (
-                aiohttp.ClientResponseError,
-                asyncio.TimeoutError,
-                aiohttp.ClientError,
-                RobotsDenied,
-            ):
+            except (CrawlerError, RobotsDenied):
                 return url, None
 
         results = await asyncio.gather(*(_safe_fetch(url) for url in urls))
@@ -329,6 +444,12 @@ class AsyncCrawler:
         self._stats_start = time.monotonic()
         self.failed_urls.clear()
         self.processed_urls.clear()
+        self.error_log.clear()
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=self.circuit_breaker.failure_threshold,
+            failure_window=self.circuit_breaker.failure_window,
+            recovery_timeout=self.circuit_breaker.recovery_timeout,
+        )
 
         url_filter = URLFilter(
             same_domain_only=self.same_domain_only,
@@ -362,12 +483,7 @@ class AsyncCrawler:
                     self.processed_urls[url] = page
                     for link in page.get("links") or []:
                         queue.add_url(link, depth=depth + 1)
-                except (
-                    aiohttp.ClientResponseError,
-                    asyncio.TimeoutError,
-                    aiohttp.ClientError,
-                    RobotsDenied,
-                ) as exc:
+                except (CrawlerError, RobotsDenied) as exc:
                     queue.mark_failed(url, f"{type(exc).__name__}: {exc}")
                     self.failed_urls[url] = f"{type(exc).__name__}: {exc}"
                 self._print_progress(queue, start=start)

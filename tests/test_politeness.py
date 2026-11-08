@@ -9,6 +9,7 @@ import pytest
 
 from crawler import AsyncCrawler, RobotsDenied
 from tests.http_fakes import FakeResponse, FakeSession
+from crawler.errors import NetworkError
 
 ROBOTS = """
 User-agent: *
@@ -149,8 +150,8 @@ async def test_retry_uses_saved_backoff_max() -> None:
         backoff_max=30.0,
         jitter=0.0,
     )
-    with pytest.raises(asyncio.TimeoutError):
+    with pytest.raises(NetworkError):
         await crawler.fetch_url("https://a.test/slow")
     assert session.calls.count("https://a.test/slow") == 2
-    assert crawler.backoff_max == 30.0
+    assert crawler.retry_strategy.backoff_max == 30.0
     await crawler.close()

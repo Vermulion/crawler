@@ -1,6 +1,7 @@
 """Unit tests for AsyncCrawler. Uses a fake ClientSession (no network)."""
 
 from __future__ import annotations
+from crawler.errors import NetworkError, PermanentError, TransientError
 
 import asyncio
 
@@ -77,7 +78,7 @@ async def test_fetch_url_returns_body(crawler: AsyncCrawler) -> None:
 async def test_fetch_url_raises_http_error(crawler: AsyncCrawler) -> None:
     session = FakeSession({"https://bad.test": FakeResponse("nope", status=500, url="https://bad.test")})
     crawler._session = session  # type: ignore[assignment]
-    with pytest.raises(aiohttp.ClientResponseError):
+    with pytest.raises(TransientError):
         await crawler.fetch_url("https://bad.test")
     await crawler.close()
 
@@ -86,7 +87,7 @@ async def test_fetch_url_raises_http_error(crawler: AsyncCrawler) -> None:
 async def test_fetch_url_raises_timeout(crawler: AsyncCrawler) -> None:
     session = FakeSession({}, errors={"https://slow.test": asyncio.TimeoutError()})
     crawler._session = session  # type: ignore[assignment]
-    with pytest.raises(asyncio.TimeoutError):
+    with pytest.raises(NetworkError):
         await crawler.fetch_url("https://slow.test")
     await crawler.close()
 
@@ -95,7 +96,7 @@ async def test_fetch_url_raises_timeout(crawler: AsyncCrawler) -> None:
 async def test_fetch_url_raises_network_error(crawler: AsyncCrawler) -> None:
     session = FakeSession({}, errors={"https://net.test": aiohttp.ClientConnectionError("reset")})
     crawler._session = session  # type: ignore[assignment]
-    with pytest.raises(aiohttp.ClientError):
+    with pytest.raises(NetworkError):
         await crawler.fetch_url("https://net.test")
     await crawler.close()
 
@@ -187,14 +188,9 @@ async def test_fetch_url_logs_error_type(
     session = FakeSession(
         {"https://bad.test": FakeResponse("nope", status=404, url="https://bad.test")}
     )
-    crawler._session = session  # type: ignore[assignment]
-    with caplog.at_level("INFO", logger="crawler.async_crawler"):
-        with pytest.raises(aiohttp.ClientResponseError):
-            await crawler.fetch_url("https://bad.test")
+    crawler._session = session  # type: ignore[assignment]:
+    with pytest.raises(PermanentError):
+        await crawler.fetch_url("https://bad.test")
     messages = [record.getMessage() for record in caplog.records]
-    assert any("Fetching https://bad.test" in msg for msg in messages)
-    assert any(
-        "HTTP error fetching https://bad.test [ClientResponseError]" in msg
-        for msg in messages
-    )
+    assert any("PermanentError" in msg for msg in messages)
     await crawler.close()

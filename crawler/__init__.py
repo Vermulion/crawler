@@ -7,14 +7,32 @@ from crawler.rate_limiter import RateLimiter
 from crawler.robots_parser import RobotsDenied, RobotsParser
 from crawler.semaphore_manager import SemaphoreManager
 from crawler.url_filter import URLFilter
+from crawler.circuit_breaker import CircuitBreaker
+from crawler.errors import (
+    CircuitOpenError,
+    CrawlerError,
+    NetworkError,
+    ParseError,
+    PermanentError,
+    TransientError,
+)
+from crawler.retry_strategy import RetryStrategy
 
 __all__ = [
     "AsyncCrawler",
+    "CircuitBreaker",
+    "CircuitOpenError",
+    "CrawlerError",
     "CrawlerQueue",
     "HTMLParser",
+    "NetworkError",
+    "ParseError",
+    "PermanentError",
     "RateLimiter",
+    "RetryStrategy",
     "RobotsDenied",
     "RobotsParser",
     "SemaphoreManager",
+    "TransientError",
     "URLFilter",
 ]
