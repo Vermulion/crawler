@@ -7,6 +7,7 @@ import logging
 import sys
 import time
 from typing import Optional
+from collections import Counter
 
 import aiohttp
 
@@ -166,6 +167,31 @@ class AsyncCrawler:
             "avg_delay": avg_delay,
             "blocked": len(self.blocked_urls),
             "requests": self._requests_done,
+        }
+
+    def get_error_stats(self) -> dict:
+        """Summaries from error_log: types, recovered retries, wait, 4xx URLs."""
+        by_type: Counter[str] = Counter()
+        waits: list[float] = []
+        permanent: set[str] = set()
+        recovered = 0
+        for row in self.error_log:
+            name = row.get("error")
+            if name:
+                by_type[name] += 1
+            if row.get("result") == "success":
+                recovered += 1
+            wait = row.get("retry_in")
+            if wait is not None:
+                waits.append(wait)
+            if name == "PermanentError":
+                permanent.add(row["url"])
+        avg_retry = sum(waits) / len(waits) if waits else 0.0
+        return {
+            "by_type": dict(by_type),
+            "successful_retries": recovered,
+            "avg_retry_time": avg_retry,
+            "permanent_error_urls": sorted(permanent),
         }
 
     async def _get_session(self) -> aiohttp.ClientSession:

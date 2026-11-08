@@ -240,3 +240,33 @@ async def test_error_log_has_delay_and_final_result(
     assert rows[2]["retry_in"] is None
     assert rows[2]["error"] is None
     await crawler.close()
+
+@pytest.mark.asyncio
+async def test_error_stats(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("crawler.retry_strategy.asyncio.sleep", no_sleep)
+    flaky = "https://a.test/flaky"
+    missing = "https://a.test/missing"
+    session = FakeSession(
+        {
+            flaky: FakeResponse("ok", url=flaky),
+            missing: FakeResponse("nope", status=404, url=missing),
+            "https://a.test/robots.txt": FakeResponse("User-agent: *\nAllow: /"),
+        },
+        errors={flaky: asyncio.TimeoutError()},
+        fail_counts={flaky: 2},
+    )
+    crawler = _crawler(session, max_retries=3, backoff_factor=2.0)
+    assert await crawler.fetch_url(flaky) == "ok"
+    with pytest.raises(PermanentError):
+        await crawler.fetch_url(missing)
+
+    stats = crawler.get_error_stats()
+    assert stats["by_type"]["NetworkError"] == 2
+    assert stats["by_type"]["PermanentError"] == 1
+    assert stats["successful_retries"] == 1
+    assert stats["avg_retry_time"] == 3.0  # (2.0 + 4.0) / 2
+    assert stats["permanent_error_urls"] == [missing]
+    await crawler.close()
