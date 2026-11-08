@@ -30,6 +30,7 @@ def test_http_classes() -> None:
     assert isinstance(classify_status(403, "u"), PermanentError)
     assert isinstance(classify_status(404, "u"), PermanentError)
     assert isinstance(classify_status(429, "u"), TransientError)
+    assert isinstance(classify_status(500, "u"), TransientError)
     assert isinstance(classify_status(503, "u"), TransientError)
 
 

@@ -63,6 +63,8 @@ async def test_404_and_403_are_not_retried() -> None:
         assert caught.value.status == status
         assert session.calls.count(url) == 1
         assert crawler.error_log[0]["retry"] is False
+        assert crawler.error_log[0]["result"] == "failure"
+        assert crawler.error_log[0]["retry_in"] is None
         await crawler.close()
 
 
@@ -102,6 +104,9 @@ async def test_503_retries_full_max(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(TransientError):
         await crawler.fetch_url(url)
     assert session.calls.count(url) == 3
+    assert len(crawler.error_log) == 3
+    assert crawler.error_log[0]["result"] == "retry"
+    assert crawler.error_log[-1]["result"] == "failure"
     await crawler.close()
 
 
@@ -206,6 +211,31 @@ async def test_timeout_error_is_network_and_retried(
     assert crawler.error_log[-1]["result"] == "failure"
     assert crawler.error_log[-1]["retry_in"] is None
     assert crawler.error_log[0]["retry_in"] == pytest.approx(0.01)
+    assert crawler.error_log[0]["result"] == "retry"
+    await crawler.close()
+
+
+@pytest.mark.asyncio
+async def test_exponential_backoff_on_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("crawler.retry_strategy.asyncio.sleep", fake_sleep)
+    url = "https://a.test/down"
+    session = FakeSession(
+        {
+            url: FakeResponse("nope", status=503, url=url),
+            "https://a.test/robots.txt": FakeResponse("User-agent: *\nAllow: /"),
+        }
+    )
+    crawler = _crawler(session, max_retries=3, backoff_factor=2.0)
+    with pytest.raises(TransientError):
+        await crawler.fetch_url(url)
+    retry_sleeps = [s for s in sleeps if s >= 1.0]
+    assert retry_sleeps == [2.0, 4.0, 8.0]
+    assert session.calls.count(url) == 4
     await crawler.close()
 
 @pytest.mark.asyncio
@@ -270,3 +300,13 @@ async def test_error_stats(monkeypatch: pytest.MonkeyPatch) -> None:
     assert stats["avg_retry_time"] == 3.0  # (2.0 + 4.0) / 2
     assert stats["permanent_error_urls"] == [missing]
     await crawler.close()
+
+
+def test_error_stats_empty() -> None:
+    crawler = AsyncCrawler(requests_per_second=1000.0)
+    assert crawler.get_error_stats() == {
+        "by_type": {},
+        "successful_retries": 0,
+        "avg_retry_time": 0.0,
+        "permanent_error_urls": [],
+    }
