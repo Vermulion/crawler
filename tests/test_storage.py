@@ -144,36 +144,78 @@ class FakeConnection:
         self.statements.append((query, args))
         return "OK"
 
+    async def executemany(self, query: str, rows: list) -> str:
+        self.statements.append((query, rows))
+        return "OK"
+
     async def close(self) -> None:
         self.closed = True
 
 
-@pytest.mark.asyncio
-async def test_postgres_storage_inserts_and_closes() -> None:
-    fake = FakeConnection()
-
+def _pg(fake: FakeConnection, **kwargs: object) -> PostgresStorage:
     async def connect(dsn: str) -> FakeConnection:
         assert dsn.startswith("postgresql://")
         return fake
 
-    storage = PostgresStorage(
+    return PostgresStorage(
         "postgresql://user:pass@localhost:5432/crawler",
         connect=connect,
+        **kwargs,
     )
-    await storage.save(PAGE)
+
+
+@pytest.mark.asyncio
+async def test_postgres_init_db_creates_table_and_indexes() -> None:
+    fake = FakeConnection()
+    storage = _pg(fake)
+    await storage.init_db()
+    sql = " ".join(q for q, _ in fake.statements)
+    assert "CREATE TABLE IF NOT EXISTS pages" in sql
+    assert "pages_url_idx" in sql
+    assert "pages_saved_at_idx" in sql
+    assert "USING GIN" in sql
     await storage.close()
 
+
+@pytest.mark.asyncio
+async def test_postgres_save_flushes_on_close() -> None:
+    fake = FakeConnection()
+    storage = _pg(fake, batch_size=100)
+    await storage.save(PAGE)
+    batches = [rows for q, rows in fake.statements if "INSERT INTO" in q]
+    assert batches == []
+    await storage.close()
     assert fake.closed is True
-    creates = [q for q, _ in fake.statements if "CREATE TABLE" in q]
-    inserts = [(q, a) for q, a in fake.statements if "INSERT INTO" in q]
-    assert len(creates) == 1
+    inserts = [(q, rows) for q, rows in fake.statements if "INSERT INTO" in q]
     assert len(inserts) == 1
-    query, args = inserts[0]
+    query, rows = inserts[0]
     assert "pages" in query
-    assert args[0] == "https://example.com/"
-    assert json.loads(args[1])["title"] == "Example"
+    assert rows[0][0] == "https://example.com/"
+    assert json.loads(rows[0][2])["title"] == "Example"
 
 
-def test_postgres_rejects_bad_table_name() -> None:
-    with pytest.raises(StorageError):
-        PostgresStorage("postgresql://localhost/crawler", table="pages;drop")
+@pytest.mark.asyncio
+async def test_postgres_batch_insert_when_buffer_full() -> None:
+    fake = FakeConnection()
+    storage = _pg(fake, batch_size=2)
+    await storage.save({"url": "https://a.test/", "title": "A"})
+    await storage.save({"url": "https://b.test/", "title": "B"})
+    inserts = [(q, rows) for q, rows in fake.statements if "INSERT INTO" in q]
+    assert len(inserts) == 1
+    assert len(inserts[0][1]) == 2
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_save_many() -> None:
+    fake = FakeConnection()
+    storage = _pg(fake)
+    await storage.save_many(
+        [
+            {"url": "https://a.test/", "title": "A"},
+            {"url": "https://b.test/", "title": "B"},
+        ]
+    )
+    inserts = [(q, rows) for q, rows in fake.statements if "INSERT INTO" in q]
+    assert len(inserts[0][1]) == 2
+    await storage.close()

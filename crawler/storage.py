@@ -166,21 +166,27 @@ class CSVStorage(DataStorage):
 
 
 class PostgresStorage(DataStorage):
-    """INSERT each dict as JSON. Pass connect=... in tests (no real database)."""
+    """Insert page dicts with asyncpg. Call init_db() once; save() batches with executemany."""
 
     def __init__(
         self,
         dsn: str,
         *,
         table: str = "pages",
+        batch_size: int = 100,
         connect: Optional[Callable[[str], Awaitable[Any]]] = None,
     ) -> None:
         if not _TABLE_NAME.match(table):
             raise StorageError(f"Invalid table name: {table!r}")
+        if batch_size < 1:
+            raise StorageError("batch_size must be >= 1")
         self.dsn = dsn
         self.table = table
+        self.batch_size = batch_size
         self._connect = connect
         self._conn: Any = None
+        self._ready = False
+        self._buffer: list[tuple[str, str, str]] = []
 
     async def _get_conn(self) -> Any:
         if self._conn is not None:
@@ -191,30 +197,73 @@ class PostgresStorage(DataStorage):
 
             connect = asyncpg.connect
         self._conn = await connect(self.dsn)
-        await self._conn.execute(
+        return self._conn
+
+    async def init_db(self) -> None:
+        """Create the table and search indexes (safe to call more than once)."""
+        conn = await self._get_conn()
+        await conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {self.table} (
                 id SERIAL PRIMARY KEY,
-                url TEXT,
+                url TEXT NOT NULL,
+                title TEXT,
                 payload JSONB NOT NULL,
-                saved_at TIMESTAMPTZ DEFAULT NOW()
+                saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """
         )
-        return self._conn
-
-    async def save(self, data: dict) -> None:
-        data = _require_dict(data)
-        conn = await self._get_conn()
-        payload = json.dumps(data, ensure_ascii=False)
-        url = str(data.get("url") or "")
         await conn.execute(
-            f"INSERT INTO {self.table} (url, payload) VALUES ($1, $2::jsonb)",
-            url,
-            payload,
+            f"CREATE INDEX IF NOT EXISTS {self.table}_url_idx ON {self.table} (url)"
+        )
+        await conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {self.table}_saved_at_idx "
+            f"ON {self.table} (saved_at)"
+        )
+        await conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {self.table}_payload_gin_idx "
+            f"ON {self.table} USING GIN (payload)"
+        )
+        self._ready = True
+
+    def _row(self, data: dict) -> tuple[str, str, str]:
+        data = _require_dict(data)
+        url = str(data.get("url") or "")
+        title = str(data.get("title") or "")
+        payload = json.dumps(data, ensure_ascii=False)
+        return (url, title, payload)
+
+    async def flush(self) -> None:
+        """Send buffered rows in one executemany() call."""
+        if not self._buffer:
+            return
+        if not self._ready:
+            await self.init_db()
+        conn = await self._get_conn()
+        rows = list(self._buffer)
+        self._buffer.clear()
+        await conn.executemany(
+            f"INSERT INTO {self.table} (url, title, payload) "
+            f"VALUES ($1, $2, $3::jsonb)",
+            rows,
         )
 
+    async def save(self, data: dict) -> None:
+        self._buffer.append(self._row(data))
+        if len(self._buffer) >= self.batch_size:
+            await self.flush()
+
+    async def save_many(self, rows: list[dict]) -> None:
+        for item in rows:
+            self._buffer.append(self._row(item))
+        await self.flush()
+
     async def close(self) -> None:
+        await self.flush()
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+
+    async def __aenter__(self) -> PostgresStorage:
+        await self.init_db()
+        return self

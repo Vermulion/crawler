@@ -23,6 +23,13 @@ from crawler.storage import (
     PostgresStorage,
     StorageError,
 )
+from crawler.storage import (
+    CSVStorage,
+    DataStorage,
+    JSONStorage,
+    PostgresStorage,
+    StorageError,
+)
 from crawler.retry_strategy import RetryStrategy
 
 __all__ = [
@@ -45,6 +52,7 @@ __all__ = [
     "CSVStorage",
     "DataStorage",
     "JSONStorage",
+    "PostgreStorage",
     "PostgresStorage",
     "StorageError",
 ]
