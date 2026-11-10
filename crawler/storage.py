@@ -9,6 +9,7 @@ import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
+from datetime import datetime, timezone
 
 import aiofiles
 
@@ -42,10 +43,63 @@ def _require_dict(data: dict) -> dict:
         raise StorageError(f"save() expects a dict, got {type(data).__name__}")
     return data
 
+RECORD_FIELDS = (
+    "url",
+    "title",
+    "text",
+    "links",
+    "metadata",
+    "crawled_at",
+    "status_code",
+    "content_type",
+)
+
+
+def _json_default(obj: Any) -> str:
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def normalize_page(data: dict, *, now: datetime | None = None) -> dict:
+    """Turn any dict into the saved page record (missing keys get defaults)."""
+    data = _require_dict(data)
+    crawled_at = data.get("crawled_at")
+    if isinstance(crawled_at, datetime):
+        if crawled_at.tzinfo is None:
+            crawled_at = crawled_at.replace(tzinfo=timezone.utc)
+    elif isinstance(crawled_at, str) and crawled_at:
+        crawled_at = datetime.fromisoformat(crawled_at.replace("Z", "+00:00"))
+    else:
+        crawled_at = now or datetime.now(timezone.utc)
+
+    links = data.get("links") or []
+    if not isinstance(links, list):
+        links = []
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+
+    raw_status = data.get("status_code", data.get("status"))
+    try:
+        status_code = int(raw_status) if raw_status is not None else 0
+    except (TypeError, ValueError):
+        status_code = 0
+
+    return {
+        "url": str(data.get("url") or ""),
+        "title": str(data.get("title") or ""),
+        "text": str(data.get("text") or ""),
+        "links": [str(item) for item in links],
+        "metadata": metadata,
+        "crawled_at": crawled_at,
+        "status_code": status_code,
+        "content_type": str(data.get("content_type") or ""),
+    }
 
 def _cell(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
     return str(value)
@@ -73,13 +127,13 @@ class JSONStorage(DataStorage):
         return self._fh
 
     async def save(self, data: dict) -> None:
-        data = _require_dict(data)
+        data = normalize_page(data)
         fh = await self._ensure_open()
         encoder = json.JSONEncoder(
             ensure_ascii=self.ensure_ascii,
             indent=self.indent,
+            default=_json_default,
         )
-        # Stream chunks: a large "text" / links list is not dumped as one string.
         for chunk in encoder.iterencode(data):
             await fh.write(chunk)
         await fh.write("\n")
@@ -144,11 +198,12 @@ class CSVStorage(DataStorage):
         return self._fh
 
     async def save(self, data: dict) -> None:
-        data = _require_dict(data)
-        row = {key: _cell(value) for key, value in data.items()}
+        data = normalize_page(data)
+        row = {key: _cell(data[key]) for key in RECORD_FIELDS}
         fh = await self._ensure_open()
         if self.fieldnames is None:
-            self.fieldnames = list(row.keys())
+            self.fieldnames = list(RECORD_FIELDS)
+    # ... rest unchanged (header + writerow)
         if not self._header_written:
             buf = io.StringIO()
             self._writer(buf).writeheader()
@@ -227,11 +282,9 @@ class PostgresStorage(DataStorage):
         self._ready = True
 
     def _row(self, data: dict) -> tuple[str, str, str]:
-        data = _require_dict(data)
-        url = str(data.get("url") or "")
-        title = str(data.get("title") or "")
-        payload = json.dumps(data, ensure_ascii=False)
-        return (url, title, payload)
+        data = normalize_page(data)
+        payload = json.dumps(data, ensure_ascii=False, default=_json_default)
+        return (data["url"], data["title"], payload)
 
     async def flush(self) -> None:
         """Send buffered rows in one executemany() call."""

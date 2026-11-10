@@ -5,6 +5,17 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+from datetime import datetime, timezone
+
+from crawler.storage import (
+    CSVStorage,
+    DataStorage,
+    JSONStorage,
+    PostgresStorage,
+    RECORD_FIELDS,
+    StorageError,
+    normalize_page,
+)
 
 import pytest
 
@@ -89,12 +100,14 @@ async def test_csv_detects_header_from_existing_file(tmp_path: Path) -> None:
 
     async with CSVStorage(path) as storage:
         await storage.save({"url": "https://b.test/", "title": "B"})
-        assert storage.fieldnames == ["url", "title"]
+        assert storage.fieldnames == list(RECORD_FIELDS)
 
     text = path.read_text(encoding="utf-8")
-    assert text.count("url,title") == 1
+    header = ",".join(RECORD_FIELDS)
+    assert text.count(header) == 1
     rows = list(csv.DictReader(text.splitlines()))
     assert [row["title"] for row in rows] == ["A", "B"]
+    assert [row["url"] for row in rows] == ["https://a.test/", "https://b.test/"]
 
 
 @pytest.mark.asyncio
@@ -219,3 +232,40 @@ async def test_postgres_save_many() -> None:
     inserts = [(q, rows) for q, rows in fake.statements if "INSERT INTO" in q]
     assert len(inserts[0][1]) == 2
     await storage.close()
+
+def test_normalize_page_fills_defaults() -> None:
+    record = normalize_page(
+        {"url": "https://example.com/", "title": "Example", "images": ["/x.png"]},
+        now=datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc),
+    )
+    assert list(record) == list(RECORD_FIELDS)
+    assert "images" not in record
+    assert record["text"] == ""
+    assert record["links"] == []
+    assert record["metadata"] == {}
+    assert record["status_code"] == 0
+    assert record["content_type"] == ""
+    assert record["crawled_at"] == datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+
+@pytest.mark.asyncio
+async def test_json_storage_writes_standard_record(tmp_path: Path) -> None:
+    path = tmp_path / "page.jsonl"
+    fixed = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+    async with JSONStorage(path, indent=None) as storage:
+        await storage.save(
+            {
+                "url": "https://example.com/",
+                "title": "Example",
+                "text": "Hello",
+                "links": ["https://example.com/a"],
+                "metadata": {"description": "demo"},
+                "crawled_at": fixed,
+                "status_code": 200,
+                "content_type": "text/html",
+            }
+        )
+    loaded = json.loads(path.read_text(encoding="utf-8").strip())
+    assert set(loaded) == set(RECORD_FIELDS)
+    assert loaded["status_code"] == 200
+    assert loaded["content_type"] == "text/html"
+    assert loaded["crawled_at"].startswith("2026-11-10T12:00:00")
