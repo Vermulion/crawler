@@ -92,33 +92,77 @@ class JSONStorage(DataStorage):
 
 
 class CSVStorage(DataStorage):
-    """Append one CSV row per save(). Nested values are JSON strings."""
+    """Append one CSV row per save(). Headers come from the first row or an existing file."""
 
-    def __init__(self, path: str | Path, *, fieldnames: Optional[list[str]] = None) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        fieldnames: Optional[list[str]] = None,
+        encoding: str = "utf-8",
+        delimiter: str = ",",
+    ) -> None:
         self.path = Path(path)
-        self.fieldnames = fieldnames
+        self.fieldnames = list(fieldnames) if fieldnames else None
+        self.encoding = encoding
+        self.delimiter = delimiter
+        self._fh: Any = None
+        self._header_written = False
+
+    def _writer(self, buf: io.StringIO) -> csv.DictWriter:
+        if self.fieldnames is None:
+            raise StorageError("CSV headers are not set")
+        return csv.DictWriter(
+            buf,
+            fieldnames=self.fieldnames,
+            extrasaction="ignore",
+            restval="",
+            quoting=csv.QUOTE_MINIMAL,
+            lineterminator="\n",
+            delimiter=self.delimiter,
+            quotechar='"',
+            doublequote=True,
+        )
+
+    async def _ensure_open(self) -> Any:
+        if self._fh is not None:
+            return self._fh
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        exists = self.path.exists() and self.path.stat().st_size > 0
+        if self.fieldnames is None and exists:
+            async with aiofiles.open(
+                self.path, "r", encoding=self.encoding, newline=""
+            ) as fh:
+                first = await fh.readline()
+            columns = next(csv.reader([first], delimiter=self.delimiter), [])
+            if columns:
+                self.fieldnames = columns
+                self._header_written = True
+        self._fh = await aiofiles.open(
+            self.path, "a", encoding=self.encoding, newline=""
+        )
+        return self._fh
 
     async def save(self, data: dict) -> None:
         data = _require_dict(data)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         row = {key: _cell(value) for key, value in data.items()}
-        write_header = not self.path.exists() or self.path.stat().st_size == 0
+        fh = await self._ensure_open()
         if self.fieldnames is None:
             self.fieldnames = list(row.keys())
-        for key in row:
-            if key not in self.fieldnames:
-                self.fieldnames.append(key)
-
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=self.fieldnames, extrasaction="ignore")
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
-        async with aiofiles.open(self.path, "a", encoding="utf-8", newline="") as fh:
+        if not self._header_written:
+            buf = io.StringIO()
+            self._writer(buf).writeheader()
             await fh.write(buf.getvalue())
+            self._header_written = True
+        buf = io.StringIO()
+        self._writer(buf).writerow(row)
+        await fh.write(buf.getvalue())
+        await fh.flush()
 
     async def close(self) -> None:
-        return None
+        if self._fh is not None:
+            await self._fh.close()
+            self._fh = None
 
 
 class PostgresStorage(DataStorage):

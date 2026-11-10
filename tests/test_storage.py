@@ -81,6 +81,52 @@ async def test_csv_storage_writes_header_and_flattens(tmp_path: Path) -> None:
     assert json.loads(rows[0]["links"]) == ["https://example.com/a"]
     assert rows[1]["title"] == "A"
 
+@pytest.mark.asyncio
+async def test_csv_detects_header_from_existing_file(tmp_path: Path) -> None:
+    path = tmp_path / "pages.csv"
+    async with CSVStorage(path) as storage:
+        await storage.save({"url": "https://a.test/", "title": "A"})
+
+    async with CSVStorage(path) as storage:
+        await storage.save({"url": "https://b.test/", "title": "B"})
+        assert storage.fieldnames == ["url", "title"]
+
+    text = path.read_text(encoding="utf-8")
+    assert text.count("url,title") == 1
+    rows = list(csv.DictReader(text.splitlines()))
+    assert [row["title"] for row in rows] == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_csv_quotes_special_characters(tmp_path: Path) -> None:
+    path = tmp_path / "special.csv"
+    page = {
+        "url": "https://example.com/",
+        "title": 'Hello, "world"',
+        "text": "line1\nline2",
+    }
+    async with CSVStorage(path) as storage:
+        await storage.save(page)
+
+    with path.open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows[0]["title"] == 'Hello, "world"'
+    assert rows[0]["text"] == "line1\nline2"
+    raw = path.read_text(encoding="utf-8")
+    assert '"Hello, ""world"""' in raw
+
+
+@pytest.mark.asyncio
+async def test_csv_encoding_cp1251(tmp_path: Path) -> None:
+    path = tmp_path / "ru.csv"
+    async with CSVStorage(path, encoding="cp1251") as storage:
+        await storage.save({"url": "https://example.com/", "title": "Привет"})
+
+    raw = path.read_bytes()
+    assert "Привет".encode("cp1251") in raw
+    with path.open(encoding="cp1251", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows[0]["title"] == "Привет"
 
 @pytest.mark.asyncio
 async def test_save_rejects_non_dict(tmp_path: Path) -> None:
