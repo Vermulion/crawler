@@ -6,7 +6,60 @@ import pytest
 
 from crawler import AsyncCrawler
 from tests.http_fakes import FakeResponse, FakeSession
+from crawler.storage import DataStorage
 
+class ListStorage(DataStorage):
+    """In-memory backend so tests stay offline."""
+    def __init__(self) -> None:
+        self.saved: list[dict] = []
+        self.batch_sizes: list[int] = []
+    async def save(self, data: dict) -> None:
+        self.saved.append(data)
+    async def save_many(self, rows: list[dict]) -> None:
+        self.batch_sizes.append(len(rows))
+        for row in rows:
+            await self.save(row)
+    async def close(self) -> None:
+        return None
+
+@pytest.mark.asyncio
+async def test_crawl_saves_each_page() -> None:
+    mapping = {
+        "https://site.test/": _page("https://site.test/", "https://site.test/b"),
+        "https://site.test/b": _page("https://site.test/b"),
+    }
+    storage = ListStorage()
+    crawler, _session = await _crawl_with_pages(
+        mapping,
+        ["https://site.test/"],
+        max_depth=1,
+        storage=storage,
+        storage_batch_size=1,
+    )
+    urls = {row["url"] for row in storage.saved}
+    assert urls == {"https://site.test/", "https://site.test/b"}
+    assert storage.batch_sizes == [1, 1]
+    assert storage.saved[0]["status_code"] == 200
+    assert "text/html" in storage.saved[0]["content_type"]
+    await crawler.close()
+
+@pytest.mark.asyncio
+async def test_crawl_batch_save() -> None:
+    mapping = {
+        "https://site.test/": _page("https://site.test/", "https://site.test/b"),
+        "https://site.test/b": _page("https://site.test/b"),
+    }
+    storage = ListStorage()
+    crawler, _session = await _crawl_with_pages(
+        mapping,
+        ["https://site.test/"],
+        max_depth=1,
+        storage=storage,
+        storage_batch_size=2,
+    )
+    assert len(storage.saved) == 2
+    assert storage.batch_sizes == [2]
+    await crawler.close()
 
 def _page(url: str, *hrefs: str) -> FakeResponse:
     anchors = "".join(f'<a href="{href}">{href}</a>' for href in hrefs)

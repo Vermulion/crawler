@@ -20,10 +20,17 @@ def http_error(status: int, url: str = "https://x.test") -> aiohttp.ClientRespon
 
 
 class FakeResponse:
-    def __init__(self, text: str, status: int = 200, url: str = "https://x.test") -> None:
+    def __init__(
+        self,
+        text: str,
+        status: int = 200,
+        url: str = "https://x.test",
+        headers: dict | None = None,
+    ) -> None:
         self._text = text
         self.status = status
         self._url = url
+        self.headers = headers or {"Content-Type": "text/html"}
 
     async def text(self) -> str:
         return self._text

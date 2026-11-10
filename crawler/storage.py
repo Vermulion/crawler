@@ -34,6 +34,11 @@ class DataStorage(ABC):
     async def __aenter__(self) -> DataStorage:
         return self
 
+    async def save_many(self, rows: list[dict]) -> None:
+        """Save many records. PostgresStorage overrides this with executemany."""
+        for row in rows:
+            await self.save(row)
+
     async def __aexit__(self, *args: object) -> None:
         await self.close()
 
