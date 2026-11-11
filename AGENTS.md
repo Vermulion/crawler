@@ -17,6 +17,7 @@ Python async HTTP crawler using **aiohttp**. Package lives in `crawler/`.
 - Python 3.9+
 - aiohttp 3.x
 - beautifulsoup4 (stdlib `html.parser`)
+- aiofiles (JSON/CSV), asyncpg (PostgreSQL)
 - pytest + pytest-asyncio for tests
 
 ## Layout
@@ -25,8 +26,9 @@ Python async HTTP crawler using **aiohttp**. Package lives in `crawler/`.
 crawler/                 # importable package
   __init__.py            # AsyncCrawler, HTMLParser, CrawlerQueue, URLFilter,
                          # SemaphoreManager, RateLimiter, RobotsParser, RobotsDenied,
-                         # RetryStrategy, CircuitBreaker, CrawlerError types
-  async_crawler.py       # HTTP + crawl loop + error_log / get_error_stats
+                         # RetryStrategy, CircuitBreaker, CrawlerError types,
+                         # DataStorage, JSONStorage, CSVStorage, PostgresStorage
+  async_crawler.py       # HTTP + crawl loop + error_log / get_error_stats + storage flush
   html_parser.py         # HTMLParser (BeautifulSoup)
   crawler_queue.py       # CrawlerQueue
   url_filter.py          # URLFilter
@@ -36,6 +38,7 @@ crawler/                 # importable package
   retry_strategy.py      # exponential backoff, status-specific retries
   circuit_breaker.py     # per-domain open / half-open / closed
   errors.py              # CrawlerError tree + classify_status / classify_exception
+  storage.py             # DataStorage ABC; JSON / CSV / Postgres; normalize_page
 tests/                   # pytest (no network)
 examples/
   fetch_example.py
@@ -44,22 +47,36 @@ examples/
   crawl_demo.py          # live crawl + crawl_results.json
   polite_demo.py         # rate limit + robots.txt + delay stats
   error_demo.py          # mixed HTTP errors + retries + error_report.json
+  storage_demo.py        # crawl → JSONL + CSV; Postgres if DATABASE_URL
+docker-compose.yml       # optional local Postgres for the storage demo
 requirements.txt
 requirements-dev.txt
 ```
 
 ## Current API
 
-`AsyncCrawler(max_concurrent=10, max_per_domain=2, *, connect_timeout=10, read_timeout=30, total_timeout=60, timeout_backoff_factor=2, timeout_max=120, pool_limit=100, pool_limit_per_host=max_concurrent, same_domain_only=True, include_patterns=None, exclude_patterns=None, requests_per_second=1.0, rate_limit_per_domain=True, min_delay=0, jitter=0, max_retries=0, backoff_factor=0.5, backoff_max=30, retry_strategy=None, circuit_breaker=None, failure_threshold=5, failure_window=60, recovery_timeout=30, user_agent="AsyncCrawler", user_agents=None)`
+`AsyncCrawler(max_concurrent=10, max_per_domain=2, *, connect_timeout=10, read_timeout=30, total_timeout=60, timeout_backoff_factor=2, timeout_max=120, pool_limit=100, pool_limit_per_host=max_concurrent, same_domain_only=True, include_patterns=None, exclude_patterns=None, requests_per_second=1.0, rate_limit_per_domain=True, min_delay=0, jitter=0, max_retries=0, backoff_factor=0.5, backoff_max=30, retry_strategy=None, circuit_breaker=None, failure_threshold=5, failure_window=60, recovery_timeout=30, user_agent="AsyncCrawler", user_agents=None, storage=None, storage_batch_size=1, storage_max_retries=2, storage_backoff_factor=0.5)`
 
 - `fetch_url(url: str) -> str` — GET one URL; robots.txt; circuit breaker; rate limiter; `SemaphoreManager.limit(url)`; per-try timeout; `RetryStrategy`; `_record` into `error_log`; re-raise `CrawlerError` / `RobotsDenied`
 - `fetch_urls(urls: list[str]) -> dict[str, str]` — parallel GET; skip `CrawlerError` / `RobotsDenied`
-- `fetch_and_parse(url: str) -> dict` — fetch then parse
-- `crawl(start_urls, max_pages=100, *, max_depth=None) -> dict[str, dict]` — queue + filters + progress; clears `error_log` and rebuilds the circuit breaker
-- `visited_urls: set[str]`, `processed_urls: dict[str, dict]`, `failed_urls: dict[str, str]`, `blocked_urls: set[str]`, `error_log: list[dict]`
+- `fetch_and_parse(url: str) -> dict` — fetch then parse; sets `status_code`, `content_type`, `crawled_at`
+- `crawl(start_urls, max_pages=100, *, max_depth=None) -> dict[str, dict]` — queue + filters + progress; clears `error_log` and rebuilds the circuit breaker; if `storage` is set, `save_many` in batches
+- `visited_urls: set[str]`, `processed_urls: dict[str, dict]`, `failed_urls: dict[str, str]`, `blocked_urls: set[str]`, `error_log: list[dict]`, `storage_errors: list[dict]`
 - `get_speed_stats() -> dict` — `requests_per_second`, `avg_delay`, `blocked`, `requests`
 - `get_error_stats() -> dict` — `by_type`, `successful_retries`, `avg_retry_time`, `permanent_error_urls`
-- `close()` — `await session.close()` then `asyncio.sleep(0)`; also `async with AsyncCrawler() as c`
+- `close()` — flush leftover storage rows (does **not** close `storage`), then `await session.close()`; also `async with AsyncCrawler() as c`
+
+Storage save failures: retry `storage_max_retries` extra times, log WARNING/ERROR, continue the crawl. HTTP `RetryStrategy` is not used for disk/DB errors.
+
+Saved record (`normalize_page` / `RECORD_FIELDS`): `{url, title, text, links, metadata, crawled_at, status_code, content_type}`. Parser extras (`images`, …) are dropped on save. `crawled_at` is ISO-8601 in JSON/CSV.
+
+`JSONStorage(path, indent=2, buffer_bytes=65536)` — JSONL; encode in a thread; RAM buffer; `close()` flushes. Use `indent=None` for compact lines.
+
+`CSVStorage(path, encoding="utf-8", buffer_bytes=65536)` — auto header; quoting; same buffer pattern.
+
+`PostgresStorage(dsn, table="pages", batch_size=100, connect=None)` — `init_db()` table + indexes; `executemany`; tests inject `connect=`. DSN is `postgresql://…`, not a `.db` file.
+
+`DataStorage` — ABC: `save`, `save_many`, `close`. Prefer `async with` on the storage object so the file/DB buffer is written.
 
 Session: `ClientTimeout(total, connect, sock_read=read_timeout)` + `TCPConnector(limit, limit_per_host, ttl_dns_cache=300, enable_cleanup_closed=True)`. Each GET may pass a larger timeout: `base * timeout_backoff_factor**attempt`, capped by `timeout_max`.
 
@@ -85,7 +102,7 @@ Session: `ClientTimeout(total, connect, sock_read=read_timeout)` + `TCPConnector
 
 `HTMLParser` — `parse_html`, `extract_links` (same-host), `extract_link_details`, text/metadata/images/headings/tables/lists.
 
-Page dict: `{url, title, text, links, link_details, metadata, images, headings, tables, lists}`.
+Parser page dict: `{url, title, text, links, link_details, metadata, images, headings, tables, lists}` plus crawl fields `status_code`, `content_type`, `crawled_at`.
 
 `crawl` builds `URLFilter` from crawler settings and seed hosts, then `CrawlerQueue`. Progress goes to stderr (`processed`, `queue`, `errors`, `pages/s`, `req/s`, `avg_delay`, `robots_blocked`).
 
@@ -103,8 +120,8 @@ Page dict: `{url, title, text, links, link_details, metadata, images, headings, 
 ## Do not
 
 - Do not crawl without concurrency limits.
-- Do not commit `.venv`, `__pycache__`, `.env`, `crawl_results.json`, `error_report.json`.
+- Do not commit `.venv`, `__pycache__`, `.env`, `crawl_results.json`, `error_report.json`, `results.jsonl`, `results.csv`.
 
 ## Next likely steps
 
-Persistence, robots.txt refresh, configurable respect_robots flag.
+robots.txt refresh, configurable respect_robots flag.

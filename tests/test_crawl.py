@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from crawler import AsyncCrawler
+from crawler.storage import RECORD_FIELDS, DataStorage, JSONStorage
 from tests.http_fakes import FakeResponse, FakeSession
-from crawler.storage import DataStorage
 
 class ListStorage(DataStorage):
     """In-memory backend so tests stay offline."""
@@ -59,6 +62,28 @@ async def test_crawl_batch_save() -> None:
     )
     assert len(storage.saved) == 2
     assert storage.batch_sizes == [2]
+    await crawler.close()
+
+
+@pytest.mark.asyncio
+async def test_crawl_json_record_integrity(tmp_path: Path) -> None:
+    mapping = {"https://site.test/": _page("https://site.test/")}
+    path = tmp_path / "out.jsonl"
+    storage = JSONStorage(path, indent=None, buffer_bytes=1)
+    crawler, _session = await _crawl_with_pages(
+        mapping,
+        ["https://site.test/"],
+        max_depth=0,
+        storage=storage,
+        storage_batch_size=1,
+    )
+    await storage.close()
+    rec = json.loads(path.read_text(encoding="utf-8").strip())
+    assert set(rec) == set(RECORD_FIELDS)
+    assert rec["url"] == "https://site.test/"
+    assert rec["status_code"] == 200
+    assert rec["title"]
+    assert "crawled_at" in rec
     await crawler.close()
 
 def _page(url: str, *hrefs: str) -> FakeResponse:

@@ -3,13 +3,16 @@
 Async HTTP crawler on **aiohttp**. It fetches pages in parallel with a global
 and per-domain concurrency cap, follows same-host links through a priority
 queue, filters URLs, respects `robots.txt`, rate-limits requests, retries
-temporary failures, and can save crawl or error reports.
+temporary failures, and can save pages to JSONL, CSV, or PostgreSQL.
 
 ## What it does
 
 Public classes: `AsyncCrawler`, `HTMLParser`, `CrawlerQueue`, `URLFilter`,
 `SemaphoreManager`, `RateLimiter`, `RobotsParser`, `RetryStrategy`,
-`CircuitBreaker`. `RobotsDenied` is raised when `robots.txt` forbids a URL.
+`CircuitBreaker`, `DataStorage`, `JSONStorage`, `CSVStorage`,
+`PostgresStorage`. `RobotsDenied` is raised when `robots.txt` forbids a URL.
+`StorageError` is raised for bad save input. `normalize_page()` builds the
+saved record.
 Load failures are mapped to `CrawlerError` subclasses (`TransientError`,
 `PermanentError`, `NetworkError`, `ParseError`, `CircuitOpenError`).
 
@@ -25,15 +28,26 @@ Load failures are mapped to `CrawlerError` subclasses (`TransientError`,
 | `URLFilter` | `same_domain_only`, include (whitelist), exclude (blacklist) |
 | `fetch_url(url) -> str` | GET one page; robots + rate limit + retries; log each try; re-raise `CrawlerError` / `RobotsDenied` |
 | `fetch_urls(urls) -> dict[str, str]` | Parallel GET; skip `CrawlerError` / `RobotsDenied` |
-| `fetch_and_parse(url) -> dict` | Fetch + parse into the page dict |
-| `crawl(start_urls, max_pages, max_depth=)` | Walk links; fill visited/processed/failed |
+| `fetch_and_parse(url) -> dict` | Fetch + parse; add `status_code`, `content_type`, `crawled_at` |
+| `crawl(start_urls, max_pages, max_depth=)` | Walk links; fill visited/processed/failed; optional `storage.save_many` |
+| `JSONStorage` / `CSVStorage` / `PostgresStorage` | Async `save` / `save_many` / `close`; JSONL, CSV, or PostgreSQL |
+| `normalize_page(data)` | Standard saved fields (drops parser extras such as `images`) |
 | `error_log` | Per-try rows: `error`, `url`, `attempt`, `retry_in`, `result` (`retry` / `failure` / `success`) |
 | `get_error_stats()` | Counts by type, successful retries, average retry wait, URLs with permanent errors |
 | `get_speed_stats()` | `requests_per_second`, `avg_delay`, `blocked`, `requests` |
 | `HTMLParser.parse_html(html, url)` | Same dict from raw HTML |
 | `close()` / `async with` | Close the HTTP session |
 
-Page dict: `{url, title, text, links, link_details, metadata, images, headings, tables, lists}`.
+Parser page dict: `{url, title, text, links, link_details, metadata, images, headings, tables, lists}`.
+Saved record: `{url, title, text, links, metadata, crawled_at, status_code, content_type}`.
+
+Pass `storage=` into `AsyncCrawler`. After each successful page, the crawler
+buffers rows and calls `save_many` every `storage_batch_size` pages (and at
+the end of `crawl` / `close`). Disk or DB errors are retried
+(`storage_max_retries`); they are logged and **do not stop** the crawl
+(`storage_errors`). Close the storage object yourself (`async with JSONStorage(...)`)
+so file buffers are flushed. `PostgresStorage` needs a DSN
+`postgresql://user:pass@host:5432/dbname`, not a `.db` file.
 
 `crawl` prints live progress on stderr: processed count, queue size, errors,
 pages/s, req/s, average delay, robots blocked.
@@ -90,32 +104,51 @@ Error-handling demo (404/403/5xx/429/timeout, retries, stats; writes `error_repo
 PYTHONPATH=. python examples/error_demo.py
 ```
 
+Storage demo (network; writes `results.jsonl` and `results.csv`; Postgres if `DATABASE_URL` is set):
+
+```bash
+PYTHONPATH=. python examples/storage_demo.py
+```
+
+Optional local Postgres (Docker Desktop must be running; CLI may be in `~/.docker/bin`):
+
+```bash
+docker compose up -d
+export DATABASE_URL=postgresql://crawler:crawler@localhost:5432/crawler
+PYTHONPATH=. python examples/storage_demo.py
+docker compose exec postgres psql -U crawler -d crawler -c "SELECT id, url, title FROM pages;"
+```
+
 Library usage:
 
 ```python
 import asyncio
-from crawler import AsyncCrawler
+from crawler import AsyncCrawler, JSONStorage
 from crawler.errors import CrawlerError
 
 async def main():
-    async with AsyncCrawler(
-        max_concurrent=5,
-        requests_per_second=2.0,
-        min_delay=0.5,
-        max_retries=2,
-        backoff_factor=0.5,
-        user_agent="MyBot/1.0",
-        same_domain_only=True,
-        exclude_patterns=[r"\.pdf$"],
-    ) as crawler:
-        results = await crawler.crawl(
-            start_urls=["https://example.com"],
-            max_pages=50,
-            max_depth=2,
-        )
-        print(len(results), crawler.visited_urls, crawler.failed_urls)
-        print(crawler.get_speed_stats())
-        print(crawler.get_error_stats())
+    async with JSONStorage("pages.jsonl", indent=None) as storage:
+        async with AsyncCrawler(
+            max_concurrent=5,
+            requests_per_second=2.0,
+            min_delay=0.5,
+            max_retries=2,
+            backoff_factor=0.5,
+            user_agent="MyBot/1.0",
+            same_domain_only=True,
+            exclude_patterns=[r"\.pdf$"],
+            storage=storage,
+            storage_batch_size=10,
+        ) as crawler:
+            results = await crawler.crawl(
+                start_urls=["https://example.com"],
+                max_pages=50,
+                max_depth=2,
+            )
+            print(len(results), crawler.visited_urls, crawler.failed_urls)
+            print(crawler.get_speed_stats())
+            print(crawler.get_error_stats())
+            print(crawler.storage_errors)
 
 asyncio.run(main())
 ```
@@ -137,7 +170,8 @@ python -m pytest -q
 | `tests/test_html_parser.py` | page dict, links, extras, parse errors |
 | `tests/test_crawler_queue.py` | priority, `max_depth`, whitelist/blacklist, no duplicate enqueue |
 | `tests/test_url_filter.py` | same-domain, include/exclude patterns |
-| `tests/test_crawl.py` | depth cap, unique `visited_urls`, crawl-time filters |
+| `tests/test_crawl.py` | depth cap, unique `visited_urls`, crawl-time filters, storage batch/retry, JSON record from crawl |
+| `tests/test_storage.py` | JSON/CSV/Postgres save, buffers, `normalize_page`, record integrity, fake DB |
 | `tests/test_rate_limiter.py` | one domain, several domains, global clock, `min_delay` |
 | `tests/test_robots_parser.py` | parse, user-agent groups, crawl-delay, 404/403 |
 | `tests/test_politeness.py` | forbidden URL, crawl records the block, delay and rate limits |

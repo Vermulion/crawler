@@ -28,6 +28,14 @@ PAGE = {
     "metadata": {"description": "demo"},
 }
 
+FULL_PAGE = {
+    **PAGE,
+    "crawled_at": datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc),
+    "status_code": 200,
+    "content_type": "text/html",
+    "images": ["/ignore.png"],
+}
+
 
 def test_cannot_create_abstract_storage() -> None:
     with pytest.raises(TypeError):
@@ -286,3 +294,52 @@ async def test_json_save_many_one_chunk(tmp_path: Path) -> None:
         )
     lines = path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
+
+
+def test_postgres_rejects_bad_table_name() -> None:
+    with pytest.raises(StorageError):
+        PostgresStorage("postgresql://localhost/crawler", table="pages;drop")
+
+
+def _assert_standard_record(loaded: dict, *, csv_cells: bool = False) -> None:
+    assert set(loaded) == set(RECORD_FIELDS)
+    assert loaded["url"] == FULL_PAGE["url"]
+    assert loaded["title"] == FULL_PAGE["title"]
+    assert loaded["text"] == FULL_PAGE["text"]
+    if csv_cells:
+        assert json.loads(loaded["links"]) == FULL_PAGE["links"]
+        assert json.loads(loaded["metadata"]) == FULL_PAGE["metadata"]
+        assert int(loaded["status_code"]) == 200
+        assert loaded["crawled_at"].startswith("2026-11-10T12:00:00")
+    else:
+        assert loaded["links"] == FULL_PAGE["links"]
+        assert loaded["metadata"] == FULL_PAGE["metadata"]
+        assert loaded["status_code"] == 200
+        assert loaded["crawled_at"].startswith("2026-11-10T12:00:00")
+    assert loaded["content_type"] == "text/html"
+    assert "images" not in loaded
+
+
+@pytest.mark.asyncio
+async def test_json_csv_postgres_record_integrity(tmp_path: Path) -> None:
+    json_path = tmp_path / "page.jsonl"
+    csv_path = tmp_path / "page.csv"
+    async with JSONStorage(json_path, indent=None) as json_storage:
+        await json_storage.save(FULL_PAGE)
+    async with CSVStorage(csv_path) as csv_storage:
+        await csv_storage.save(FULL_PAGE)
+
+    json_loaded = json.loads(json_path.read_text(encoding="utf-8").strip())
+    _assert_standard_record(json_loaded)
+
+    with csv_path.open(encoding="utf-8", newline="") as fh:
+        csv_loaded = next(csv.DictReader(fh))
+    _assert_standard_record(csv_loaded, csv_cells=True)
+
+    fake = FakeConnection()
+    pg = _pg(fake)
+    await pg.save(FULL_PAGE)
+    await pg.close()
+    inserts = [(q, rows) for q, rows in fake.statements if "INSERT INTO" in q]
+    _url, _title, payload = inserts[0][1][0]
+    _assert_standard_record(json.loads(payload))
