@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 
+import pytest
+
 from crawler.storage import (
     CSVStorage,
     DataStorage,
@@ -15,16 +17,6 @@ from crawler.storage import (
     RECORD_FIELDS,
     StorageError,
     normalize_page,
-)
-
-import pytest
-
-from crawler.storage import (
-    CSVStorage,
-    DataStorage,
-    JSONStorage,
-    PostgresStorage,
-    StorageError,
 )
 
 
@@ -269,3 +261,28 @@ async def test_json_storage_writes_standard_record(tmp_path: Path) -> None:
     assert loaded["status_code"] == 200
     assert loaded["content_type"] == "text/html"
     assert loaded["crawled_at"].startswith("2026-11-10T12:00:00")
+
+
+@pytest.mark.asyncio
+async def test_json_buffers_until_close(tmp_path: Path) -> None:
+    path = tmp_path / "buf.jsonl"
+    storage = JSONStorage(path, indent=None, buffer_bytes=1_000_000)
+    await storage.save(PAGE)
+    assert not path.exists() or path.stat().st_size == 0
+    await storage.close()
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert json.loads(lines[0])["title"] == "Example"
+
+
+@pytest.mark.asyncio
+async def test_json_save_many_one_chunk(tmp_path: Path) -> None:
+    path = tmp_path / "many.jsonl"
+    async with JSONStorage(path, indent=None, buffer_bytes=1) as storage:
+        await storage.save_many(
+            [
+                {"url": "https://a.test/", "title": "A"},
+                {"url": "https://b.test/", "title": "B"},
+            ]
+        )
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2

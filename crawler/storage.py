@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import re
+import asyncio
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -109,9 +110,64 @@ def _cell(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
     return str(value)
 
+def _encode_json_line(data: dict, indent: int | None, ensure_ascii: bool) -> str:
+    page = normalize_page(data)
+    return json.dumps(
+        page,
+        ensure_ascii=ensure_ascii,
+        indent=indent,
+        default=_json_default,
+    ) + "\n"
+
+
+def _encode_json_lines(
+    rows: list[dict], indent: int | None, ensure_ascii: bool
+) -> str:
+    return "".join(_encode_json_line(row, indent, ensure_ascii) for row in rows)
+
+
+def _encode_csv_chunk(
+    rows: list[dict],
+    *,
+    fieldnames: list[str],
+    delimiter: str,
+    write_header: bool,
+) -> str:
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf,
+        fieldnames=fieldnames,
+        extrasaction="ignore",
+        restval="",
+        quoting=csv.QUOTE_MINIMAL,
+        lineterminator="\n",
+        delimiter=delimiter,
+        quotechar='"',
+        doublequote=True,
+    )
+    if write_header:
+        writer.writeheader()
+    for data in rows:
+        page = normalize_page(data)
+        writer.writerow({key: _cell(page[key]) for key in fieldnames})
+    return buf.getvalue()
+
+
+def _pg_tuples(rows: list[dict]) -> list[tuple[str, str, str]]:
+    out: list[tuple[str, str, str]] = []
+    for data in rows:
+        page = normalize_page(data)
+        payload = json.dumps(page, ensure_ascii=False, default=_json_default)
+        out.append((page["url"], page["title"], payload))
+    return out
+
+
+def _mkdir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
 
 class JSONStorage(DataStorage):
-    """Append one JSON value per save() (JSONL). Use indent=2 for pretty output."""
+    """JSONL with an in-memory buffer. CPU encoding runs in a thread."""
 
     def __init__(
         self,
@@ -119,39 +175,57 @@ class JSONStorage(DataStorage):
         *,
         indent: int | None = 2,
         ensure_ascii: bool = False,
+        buffer_bytes: int = 64 * 1024,
     ) -> None:
+        if buffer_bytes < 1:
+            raise StorageError("buffer_bytes must be >= 1")
         self.path = Path(path)
         self.indent = indent
         self.ensure_ascii = ensure_ascii
+        self.buffer_bytes = buffer_bytes
         self._fh: Any = None
+        self._chunks: list[str] = []
+        self._buffered = 0
 
     async def _ensure_open(self) -> Any:
         if self._fh is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(_mkdir, self.path.parent)
             self._fh = await aiofiles.open(self.path, "a", encoding="utf-8")
         return self._fh
 
-    async def save(self, data: dict) -> None:
-        data = normalize_page(data)
+    async def _flush_file(self) -> None:
+        if not self._chunks:
+            return
+        blob = "".join(self._chunks)
+        self._chunks.clear()
+        self._buffered = 0
         fh = await self._ensure_open()
-        encoder = json.JSONEncoder(
-            ensure_ascii=self.ensure_ascii,
-            indent=self.indent,
-            default=_json_default,
+        await fh.write(blob)
+
+    async def save(self, data: dict) -> None:
+        await self.save_many([data])
+
+    async def save_many(self, rows: list[dict]) -> None:
+        if not rows:
+            return
+        text = await asyncio.to_thread(
+            _encode_json_lines, rows, self.indent, self.ensure_ascii
         )
-        for chunk in encoder.iterencode(data):
-            await fh.write(chunk)
-        await fh.write("\n")
-        await fh.flush()
+        self._chunks.append(text)
+        self._buffered += len(text.encode("utf-8"))
+        if self._buffered >= self.buffer_bytes:
+            await self._flush_file()
 
     async def close(self) -> None:
+        await self._flush_file()
         if self._fh is not None:
+            await self._fh.flush()
             await self._fh.close()
             self._fh = None
 
 
 class CSVStorage(DataStorage):
-    """Append one CSV row per save(). Headers come from the first row or an existing file."""
+    """Append CSV rows with an in-memory buffer. Encoding runs in a thread."""
 
     def __init__(
         self,
@@ -160,35 +234,27 @@ class CSVStorage(DataStorage):
         fieldnames: Optional[list[str]] = None,
         encoding: str = "utf-8",
         delimiter: str = ",",
+        buffer_bytes: int = 64 * 1024,
     ) -> None:
+        if buffer_bytes < 1:
+            raise StorageError("buffer_bytes must be >= 1")
         self.path = Path(path)
         self.fieldnames = list(fieldnames) if fieldnames else None
         self.encoding = encoding
         self.delimiter = delimiter
+        self.buffer_bytes = buffer_bytes
         self._fh: Any = None
         self._header_written = False
+        self._chunks: list[str] = []
+        self._buffered = 0
 
-    def _writer(self, buf: io.StringIO) -> csv.DictWriter:
-        if self.fieldnames is None:
-            raise StorageError("CSV headers are not set")
-        return csv.DictWriter(
-            buf,
-            fieldnames=self.fieldnames,
-            extrasaction="ignore",
-            restval="",
-            quoting=csv.QUOTE_MINIMAL,
-            lineterminator="\n",
-            delimiter=self.delimiter,
-            quotechar='"',
-            doublequote=True,
+    async def _prepare(self) -> None:
+        if self.fieldnames is not None:
+            return
+        exists = await asyncio.to_thread(
+            lambda: self.path.exists() and self.path.stat().st_size > 0
         )
-
-    async def _ensure_open(self) -> Any:
-        if self._fh is not None:
-            return self._fh
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        exists = self.path.exists() and self.path.stat().st_size > 0
-        if self.fieldnames is None and exists:
+        if exists:
             async with aiofiles.open(
                 self.path, "r", encoding=self.encoding, newline=""
             ) as fh:
@@ -197,30 +263,53 @@ class CSVStorage(DataStorage):
             if columns:
                 self.fieldnames = columns
                 self._header_written = True
-        self._fh = await aiofiles.open(
-            self.path, "a", encoding=self.encoding, newline=""
-        )
-        return self._fh
-
-    async def save(self, data: dict) -> None:
-        data = normalize_page(data)
-        row = {key: _cell(data[key]) for key in RECORD_FIELDS}
-        fh = await self._ensure_open()
         if self.fieldnames is None:
             self.fieldnames = list(RECORD_FIELDS)
-    # ... rest unchanged (header + writerow)
-        if not self._header_written:
-            buf = io.StringIO()
-            self._writer(buf).writeheader()
-            await fh.write(buf.getvalue())
+
+    async def _ensure_open(self) -> Any:
+        if self._fh is None:
+            await asyncio.to_thread(_mkdir, self.path.parent)
+            self._fh = await aiofiles.open(
+                self.path, "a", encoding=self.encoding, newline=""
+            )
+        return self._fh
+
+    async def _flush_file(self) -> None:
+        if not self._chunks:
+            return
+        blob = "".join(self._chunks)
+        self._chunks.clear()
+        self._buffered = 0
+        fh = await self._ensure_open()
+        await fh.write(blob)
+
+    async def save(self, data: dict) -> None:
+        await self.save_many([data])
+
+    async def save_many(self, rows: list[dict]) -> None:
+        if not rows:
+            return
+        await self._prepare()
+        assert self.fieldnames is not None
+        write_header = not self._header_written
+        text = await asyncio.to_thread(
+            _encode_csv_chunk,
+            rows,
+            fieldnames=self.fieldnames,
+            delimiter=self.delimiter,
+            write_header=write_header,
+        )
+        if write_header:
             self._header_written = True
-        buf = io.StringIO()
-        self._writer(buf).writerow(row)
-        await fh.write(buf.getvalue())
-        await fh.flush()
+        self._chunks.append(text)
+        self._buffered += len(text.encode(self.encoding, errors="replace"))
+        if self._buffered >= self.buffer_bytes:
+            await self._flush_file()
 
     async def close(self) -> None:
+        await self._flush_file()
         if self._fh is not None:
+            await self._fh.flush()
             await self._fh.close()
             self._fh = None
 
@@ -286,11 +375,6 @@ class PostgresStorage(DataStorage):
         )
         self._ready = True
 
-    def _row(self, data: dict) -> tuple[str, str, str]:
-        data = normalize_page(data)
-        payload = json.dumps(data, ensure_ascii=False, default=_json_default)
-        return (data["url"], data["title"], payload)
-
     async def flush(self) -> None:
         """Send buffered rows in one executemany() call."""
         if not self._buffer:
@@ -307,13 +391,16 @@ class PostgresStorage(DataStorage):
         )
 
     async def save(self, data: dict) -> None:
-        self._buffer.append(self._row(data))
+        tuples = await asyncio.to_thread(_pg_tuples, [data])
+        self._buffer.extend(tuples)
         if len(self._buffer) >= self.batch_size:
             await self.flush()
 
     async def save_many(self, rows: list[dict]) -> None:
-        for item in rows:
-            self._buffer.append(self._row(item))
+        if not rows:
+            return
+        tuples = await asyncio.to_thread(_pg_tuples, rows)
+        self._buffer.extend(tuples)
         await self.flush()
 
     async def close(self) -> None:

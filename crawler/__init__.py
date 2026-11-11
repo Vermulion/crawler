@@ -46,7 +46,6 @@ __all__ = [
     "CSVStorage",
     "DataStorage",
     "JSONStorage",
-    "PostgreStorage",
     "PostgresStorage",
     "StorageError",
     "normalize_page",
