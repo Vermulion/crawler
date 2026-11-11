@@ -37,3 +37,5 @@ htmlcov/
 crawl_results.json
 error_report.json
 tmp_check_*.py
+results.jsonl
+results.csv
