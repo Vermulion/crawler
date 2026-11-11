@@ -16,6 +16,14 @@ from crawler.errors import (
     PermanentError,
     TransientError,
 )
+from crawler.storage import (
+    CSVStorage,
+    DataStorage,
+    JSONStorage,
+    PostgresStorage,
+    StorageError,
+    normalize_page,
+)
 from crawler.retry_strategy import RetryStrategy
 
 __all__ = [
@@ -35,4 +43,10 @@ __all__ = [
     "SemaphoreManager",
     "TransientError",
     "URLFilter",
+    "CSVStorage",
+    "DataStorage",
+    "JSONStorage",
+    "PostgresStorage",
+    "StorageError",
+    "normalize_page",
 ]

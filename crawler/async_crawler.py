@@ -8,6 +8,8 @@ import sys
 import time
 from typing import Optional
 from collections import Counter
+from datetime import datetime, timezone
+from typing import Optional, TYPE_CHECKING
 
 import aiohttp
 
@@ -20,6 +22,7 @@ from crawler.robots_parser import RobotsDenied, RobotsParser
 from crawler.circuit_breaker import CircuitBreaker
 from crawler.errors import CrawlerError, TransientError, classify_exception, CircuitOpenError
 from crawler.retry_strategy import RetryStrategy
+from crawler.storage import DataStorage
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,10 @@ class AsyncCrawler:
         recovery_timeout: float = 30.0,
         user_agent: str = "AsyncCrawler",
         user_agents: Optional[list[str]] = None,
+        storage: Optional[DataStorage] = None,
+        storage_batch_size: int = 1,
+        storage_max_retries: int = 2,
+        storage_backoff_factor: float = 0.5,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
@@ -135,6 +142,17 @@ class AsyncCrawler:
         self.same_domain_only = same_domain_only
         self.include_patterns = list(include_patterns or [])
         self.exclude_patterns = list(exclude_patterns or [])
+        if storage_batch_size < 1:
+            raise ValueError("storage_batch_size must be >= 1")
+        self.storage = storage
+        self.storage_batch_size = storage_batch_size
+        self._storage_buffer: list[dict] = []
+        self._storage_lock = asyncio.Lock()
+        if storage_max_retries < 0:
+            raise ValueError("storage_max_retries must be >= 0")
+        self.storage_max_retries = storage_max_retries
+        self.storage_backoff_factor = storage_backoff_factor
+        self.storage_errors: list[dict] = []
 
     def _print_progress(self, queue: CrawlerQueue, *, start: float) -> None:
         stats = queue.get_stats()
@@ -290,7 +308,7 @@ class AsyncCrawler:
             retry_in,
             result,
         )
-    async def fetch_url(self, url: str) -> str:
+    async def _fetch_document(self, url: str) -> str:
         """Load a single page and return its response body as text.
 
         Raises
@@ -329,7 +347,7 @@ class AsyncCrawler:
             raise err
         tries = {"n": 0}
 
-        async def _get_body() -> str:
+        async def _get_body() -> tuple[str, int, str]:
             tries["n"] += 1
             await self.rate_limiter.acquire(
                 SemaphoreManager._host(url),
@@ -353,8 +371,17 @@ class AsyncCrawler:
                     ) as response:
                         response.raise_for_status()
                         body = await response.text()
+                        status = response.status
+                        headers = getattr(response, "headers", None) or {}
+                        content_type = ""
+                        if hasattr(headers, "get"):
+                            content_type = (
+                                headers.get("Content-Type")
+                                or headers.get("content-type")
+                                or ""
+                            )
                     logger.info("Fetched %s (%d bytes) on try %d", url, len(body), n)
-                    return body
+                    return body, status, content_type
                 except (
                     aiohttp.ClientResponseError,
                     asyncio.TimeoutError,
@@ -382,7 +409,9 @@ class AsyncCrawler:
                     self._requests_done += 1
 
         try:
-            body = await self.retry_strategy.execute_with_retry(_get_body)
+            body, status, content_type = await self.retry_strategy.execute_with_retry(
+                _get_body
+            )
         except TransientError as exc:
             self.circuit_breaker.record_failure(host)
             self.failed_urls[url] = f"{type(exc).__name__}: {exc}"
@@ -400,7 +429,7 @@ class AsyncCrawler:
                 retry_in=None,
                 result="success",
             )
-        return body
+        return body, status, content_type
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         """Load many URLs in parallel. Returns {url: body} for successful fetches.
@@ -421,10 +450,17 @@ class AsyncCrawler:
         results = await asyncio.gather(*(_safe_fetch(url) for url in urls))
         return {url: body for url, body in results if body is not None}
 
+    async def fetch_url(self, url: str) -> str:
+        body, _status, _content_type = await self._fetch_document(url)
+        return body
+
     async def fetch_and_parse(self, url: str) -> dict:
-        """Fetch a page and parse it into the HTMLParser page dict."""
-        html = await self.fetch_url(url)
-        return await self.parser.parse_html(html, url)
+        html, status, content_type = await self._fetch_document(url)
+        page = await self.parser.parse_html(html, url)
+        page["status_code"] = status
+        page["content_type"] = content_type
+        page["crawled_at"] = datetime.now(timezone.utc)
+        return page
 
     async def crawl(
         self,
@@ -443,6 +479,7 @@ class AsyncCrawler:
         self._requests_done = 0
         self._stats_start = time.monotonic()
         self.failed_urls.clear()
+        self.storage_errors.clear()
         self.processed_urls.clear()
         self.error_log.clear()
         self.circuit_breaker = CircuitBreaker(
@@ -481,6 +518,7 @@ class AsyncCrawler:
                     page = await self.fetch_and_parse(url)
                     queue.mark_processed(url)
                     self.processed_urls[url] = page
+                    await self._enqueue_storage(page)
                     for link in page.get("links") or []:
                         queue.add_url(link, depth=depth + 1)
                 except (CrawlerError, RobotsDenied) as exc:
@@ -490,13 +528,82 @@ class AsyncCrawler:
 
         workers = max(1, min(self.max_concurrent, max_pages))
         await asyncio.gather(*(worker() for _ in range(workers)))
+        await self._flush_storage()
         self._print_progress(queue, start=start)
         print(file=sys.stderr)
 
         return self.processed_urls
 
+    async def _enqueue_storage(self, page: dict) -> None:
+        if self.storage is None:
+            return
+        to_flush: list[dict] | None = None
+        async with self._storage_lock:
+            self._storage_buffer.append(page)
+            if len(self._storage_buffer) >= self.storage_batch_size:
+                to_flush = self._storage_buffer
+                self._storage_buffer = []
+        if to_flush:
+            await self._save_with_retry(to_flush)
+
+    async def _flush_storage(self) -> None:
+        if self.storage is None:
+            return
+        async with self._storage_lock:
+            to_flush = self._storage_buffer
+            self._storage_buffer = []
+        if to_flush:
+            await self._save_with_retry(to_flush)
+
+    async def _save_with_retry(self, rows: list[dict]) -> None:
+        """Retry save_many. Log failures. Never raise — crawl must continue."""
+        if self.storage is None:
+            return
+        total = self.storage_max_retries + 1
+        last_exc: BaseException | None = None
+        for attempt in range(total):
+            try:
+                await self.storage.save_many(rows)
+                if attempt:
+                    logger.info(
+                        "Storage save succeeded on try %d/%d (%d pages)",
+                        attempt + 1,
+                        total,
+                        len(rows),
+                    )
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Storage save failed try %d/%d [%s]: %s",
+                    attempt + 1,
+                    total,
+                    type(exc).__name__,
+                    exc,
+                )
+                if attempt + 1 >= total:
+                    break
+                delay = self.storage_backoff_factor * (2 ** attempt)
+                await asyncio.sleep(delay)
+        logger.error(
+            "Storage save gave up after %d tries [%s]: %s (pages=%d)",
+            total,
+            type(last_exc).__name__,
+            last_exc,
+            len(rows),
+        )
+        self.storage_errors.append(
+            {
+                "error": type(last_exc).__name__,
+                "message": str(last_exc),
+                "pages": len(rows),
+                "urls": [row.get("url", "") for row in rows],
+            }
+        )
+
     async def close(self) -> None:
         """Close the HTTP session and its connection pool."""
+        await self._flush_storage()
         if self._session is not None and not self._session.closed:
             await self._session.close()
             self._session = None
