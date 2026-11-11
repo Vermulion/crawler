@@ -68,6 +68,8 @@ class AsyncCrawler:
         user_agents: Optional[list[str]] = None,
         storage: Optional[DataStorage] = None,
         storage_batch_size: int = 1,
+        storage_max_retries: int = 2,
+        storage_backoff_factor: float = 0.5,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
@@ -146,6 +148,11 @@ class AsyncCrawler:
         self.storage_batch_size = storage_batch_size
         self._storage_buffer: list[dict] = []
         self._storage_lock = asyncio.Lock()
+        if storage_max_retries < 0:
+            raise ValueError("storage_max_retries must be >= 0")
+        self.storage_max_retries = storage_max_retries
+        self.storage_backoff_factor = storage_backoff_factor
+        self.storage_errors: list[dict] = []
 
     def _print_progress(self, queue: CrawlerQueue, *, start: float) -> None:
         stats = queue.get_stats()
@@ -472,6 +479,7 @@ class AsyncCrawler:
         self._requests_done = 0
         self._stats_start = time.monotonic()
         self.failed_urls.clear()
+        self.storage_errors.clear()
         self.processed_urls.clear()
         self.error_log.clear()
         self.circuit_breaker = CircuitBreaker(
@@ -529,23 +537,69 @@ class AsyncCrawler:
     async def _enqueue_storage(self, page: dict) -> None:
         if self.storage is None:
             return
+        to_flush: list[dict] | None = None
         async with self._storage_lock:
             self._storage_buffer.append(page)
             if len(self._storage_buffer) >= self.storage_batch_size:
-                await self._flush_storage_locked()
+                to_flush = self._storage_buffer
+                self._storage_buffer = []
+        if to_flush:
+            await self._save_with_retry(to_flush)
 
     async def _flush_storage(self) -> None:
         if self.storage is None:
             return
         async with self._storage_lock:
-            await self._flush_storage_locked()
+            to_flush = self._storage_buffer
+            self._storage_buffer = []
+        if to_flush:
+            await self._save_with_retry(to_flush)
 
-    async def _flush_storage_locked(self) -> None:
-        if not self._storage_buffer or self.storage is None:
+    async def _save_with_retry(self, rows: list[dict]) -> None:
+        """Retry save_many. Log failures. Never raise — crawl must continue."""
+        if self.storage is None:
             return
-        rows = self._storage_buffer
-        self._storage_buffer = []
-        await self.storage.save_many(rows)
+        total = self.storage_max_retries + 1
+        last_exc: BaseException | None = None
+        for attempt in range(total):
+            try:
+                await self.storage.save_many(rows)
+                if attempt:
+                    logger.info(
+                        "Storage save succeeded on try %d/%d (%d pages)",
+                        attempt + 1,
+                        total,
+                        len(rows),
+                    )
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Storage save failed try %d/%d [%s]: %s",
+                    attempt + 1,
+                    total,
+                    type(exc).__name__,
+                    exc,
+                )
+                if attempt + 1 >= total:
+                    break
+                delay = self.storage_backoff_factor * (2 ** attempt)
+                await asyncio.sleep(delay)
+        logger.error(
+            "Storage save gave up after %d tries [%s]: %s (pages=%d)",
+            total,
+            type(last_exc).__name__,
+            last_exc,
+            len(rows),
+        )
+        self.storage_errors.append(
+            {
+                "error": type(last_exc).__name__,
+                "message": str(last_exc),
+                "pages": len(rows),
+                "urls": [row.get("url", "") for row in rows],
+            }
+        )
 
     async def close(self) -> None:
         """Close the HTTP session and its connection pool."""

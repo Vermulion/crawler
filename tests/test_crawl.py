@@ -169,3 +169,61 @@ async def test_crawl_respects_include_whitelist() -> None:
     assert "https://site.test/blog/post" in crawler.processed_urls
     assert "https://site.test/about" not in crawler.visited_urls
     await crawler.close()
+
+class FlakyStorage(ListStorage):
+    def __init__(self, fail_times: int) -> None:
+        super().__init__()
+        self.fail_times = fail_times
+        self.calls = 0
+
+    async def save_many(self, rows: list[dict]) -> None:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise OSError("disk full")
+        await super().save_many(rows)
+
+
+@pytest.mark.asyncio
+async def test_storage_retries_then_succeeds(caplog: pytest.LogCaptureFixture) -> None:
+    mapping = {"https://site.test/": _page("https://site.test/")}
+    storage = FlakyStorage(fail_times=2)
+    with caplog.at_level("WARNING", logger="crawler.async_crawler"):
+        crawler, _session = await _crawl_with_pages(
+            mapping,
+            ["https://site.test/"],
+            max_depth=0,
+            storage=storage,
+            storage_batch_size=1,
+            storage_max_retries=3,
+            storage_backoff_factor=0.0,
+        )
+    assert len(storage.saved) == 1
+    assert storage.calls == 3
+    assert crawler.storage_errors == []
+    assert "Storage save failed" in caplog.text
+    await crawler.close()
+
+
+@pytest.mark.asyncio
+async def test_crawl_continues_when_storage_fails(caplog: pytest.LogCaptureFixture) -> None:
+    mapping = {
+        "https://site.test/": _page("https://site.test/", "https://site.test/b"),
+        "https://site.test/b": _page("https://site.test/b"),
+    }
+    storage = FlakyStorage(fail_times=99)
+    with caplog.at_level("ERROR", logger="crawler.async_crawler"):
+        crawler, _session = await _crawl_with_pages(
+            mapping,
+            ["https://site.test/"],
+            max_depth=1,
+            storage=storage,
+            storage_batch_size=1,
+            storage_max_retries=1,
+            storage_backoff_factor=0.0,
+        )
+    assert "https://site.test/" in crawler.processed_urls
+    assert "https://site.test/b" in crawler.processed_urls
+    assert storage.saved == []
+    assert crawler.storage_errors
+    assert "Storage save gave up" in caplog.text
+    await crawler.close()
