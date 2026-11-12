@@ -150,6 +150,7 @@ class AsyncCrawler:
         self._storage_lock = asyncio.Lock()
         if storage_max_retries < 0:
             raise ValueError("storage_max_retries must be >= 0")
+        self._storage_io_lock = asyncio.Lock()
         self.storage_max_retries = storage_max_retries
         self.storage_backoff_factor = storage_backoff_factor
         self.storage_errors: list[dict] = []
@@ -552,11 +553,32 @@ class AsyncCrawler:
         async with self._storage_lock:
             to_flush = self._storage_buffer
             self._storage_buffer = []
-        if to_flush:
-            await self._save_with_retry(to_flush)
+        async with self._storage_io_lock:
+            if to_flush:
+                await self._save_with_retry_locked(to_flush)
+            try:
+                await self.storage.flush()
+            except Exception as exc:
+                logger.error(
+                    "Storage flush failed [%s]: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                self.storage_errors.append(
+                    {
+                        "error": type(exc).__name__,
+                        "message": str(exc),
+                        "pages": 0,
+                        "urls": [],
+                    }
+                )
 
     async def _save_with_retry(self, rows: list[dict]) -> None:
-        """Retry save_many. Log failures. Never raise — crawl must continue."""
+        async with self._storage_io_lock:
+            await self._save_with_retry_locked(rows)
+
+    async def _save_with_retry_locked(self, rows: list[dict]) -> None:
+        """Retry save_many. Caller must hold _storage_io_lock."""
         if self.storage is None:
             return
         total = self.storage_max_retries + 1
@@ -595,7 +617,7 @@ class AsyncCrawler:
         self.storage_errors.append(
             {
                 "error": type(last_exc).__name__,
-                "message": str(last_exc),
+                "message": str(exc) if False else str(last_exc),
                 "pages": len(rows),
                 "urls": [row.get("url", "") for row in rows],
             }

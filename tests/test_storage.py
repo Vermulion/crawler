@@ -283,6 +283,30 @@ async def test_json_buffers_until_close(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_json_flush_writes_without_close(tmp_path: Path) -> None:
+    path = tmp_path / "buf.jsonl"
+    storage = JSONStorage(path, indent=None, buffer_bytes=1_000_000)
+    await storage.save(PAGE)
+    assert not path.exists() or path.stat().st_size == 0
+    await storage.flush()
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert json.loads(lines[0])["title"] == "Example"
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_csv_flush_writes_without_close(tmp_path: Path) -> None:
+    path = tmp_path / "buf.csv"
+    storage = CSVStorage(path, buffer_bytes=1_000_000)
+    await storage.save(PAGE)
+    assert not path.exists() or path.stat().st_size == 0
+    await storage.flush()
+    with path.open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows[0]["title"] == "Example"
+    await storage.close()
+
+@pytest.mark.asyncio
 async def test_json_save_many_one_chunk(tmp_path: Path) -> None:
     path = tmp_path / "many.jsonl"
     async with JSONStorage(path, indent=None, buffer_bytes=1) as storage:

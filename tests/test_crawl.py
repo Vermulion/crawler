@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -100,10 +101,11 @@ async def _crawl_with_pages(
     max_depth: int | None = None,
     **crawler_kw,
 ) -> tuple[AsyncCrawler, FakeSession]:
+    crawler_kw.setdefault("max_concurrent", 2)
     crawler_kw.setdefault("requests_per_second", 1000.0)
     crawler_kw.setdefault("min_delay", 0.0)
     crawler_kw.setdefault("jitter", 0.0)
-    crawler = AsyncCrawler(max_concurrent=2, **crawler_kw)
+    crawler = AsyncCrawler(**crawler_kw)
     session = FakeSession(mapping)
     crawler._session = session  # type: ignore[assignment]
     await crawler.crawl(start, max_pages=max_pages, max_depth=max_depth)
@@ -252,3 +254,57 @@ async def test_crawl_continues_when_storage_fails(caplog: pytest.LogCaptureFixtu
     assert crawler.storage_errors
     assert "Storage save gave up" in caplog.text
     await crawler.close()
+
+@pytest.mark.asyncio
+async def test_crawler_close_flushes_json_file(tmp_path: Path) -> None:
+    mapping = {"https://site.test/": _page("https://site.test/")}
+    path = tmp_path / "out.jsonl"
+    storage = JSONStorage(path, indent=None, buffer_bytes=1_000_000)
+    crawler, _session = await _crawl_with_pages(
+        mapping,
+        ["https://site.test/"],
+        max_depth=0,
+        storage=storage,
+        storage_batch_size=1,
+    )
+    await crawler.close()
+    rec = json.loads(path.read_text(encoding="utf-8").strip())
+    assert rec["url"] == "https://site.test/"
+    await storage.close()
+
+class OverlapStorage(DataStorage):
+    def __init__(self) -> None:
+        self.saved: list[dict] = []
+        self._in_flight = 0
+        self.max_in_flight = 0
+
+    async def save(self, data: dict) -> None:
+        await self.save_many([data])
+
+    async def save_many(self, rows: list[dict]) -> None:
+        self._in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self._in_flight)
+        await asyncio.sleep(0.02)
+        self.saved.extend(rows)
+        self._in_flight -= 1
+
+    async def close(self) -> None:
+        return None
+
+@pytest.mark.asyncio
+async def test_storage_saves_are_serialized() -> None:
+    urls = [f"https://site.test/p{i}" for i in range(6)]
+    mapping = {url: _page(url) for url in urls}
+    storage = OverlapStorage()
+    crawler, _session = await _crawl_with_pages(
+        mapping,
+        urls,
+        max_pages=6,
+        max_depth=0,
+        max_concurrent=4,
+        storage=storage,
+        storage_batch_size=1,
+    )
+    await crawler.close()
+    assert storage.max_in_flight == 1
+    assert {row["url"] for row in storage.saved} == set(urls)
