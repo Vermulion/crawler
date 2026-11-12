@@ -28,6 +28,9 @@ class DataStorage(ABC):
     async def save(self, data: dict) -> None:
         """Persist one record (a page dict or a report dict)."""
 
+    async def flush(self) -> None:
+        """Persist one record (a page dict or a report dict)."""
+
     @abstractmethod
     async def close(self) -> None:
         """Release files / database connections."""
@@ -223,6 +226,10 @@ class JSONStorage(DataStorage):
             await self._fh.close()
             self._fh = None
 
+    async def flush(self) -> None:
+        await self._flush_file()
+        if self._fh is not None:
+            await self._fh.flush()
 
 class CSVStorage(DataStorage):
     """Append CSV rows with an in-memory buffer. Encoding runs in a thread."""
@@ -312,6 +319,11 @@ class CSVStorage(DataStorage):
             await self._fh.flush()
             await self._fh.close()
             self._fh = None
+
+    async def flush(self) -> None:
+        await self._flush_file()
+        if self._fh is not None:
+            await self._fh.flush()
 
 
 class PostgresStorage(DataStorage):

@@ -32,6 +32,10 @@ class FanoutStorage(DataStorage):
         for backend in self.backends:
             await backend.close()
 
+    async def flush(self) -> None:
+        for backend in self.backends:
+            await backend.flush()
+
 
 def _print_json_sample(path: Path) -> None:
     if not path.exists() or path.stat().st_size == 0:
