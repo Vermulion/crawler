@@ -60,23 +60,25 @@ requirements-dev.txt
 - `fetch_url(url: str) -> str` — GET one URL; robots.txt; circuit breaker; rate limiter; `SemaphoreManager.limit(url)`; per-try timeout; `RetryStrategy`; `_record` into `error_log`; re-raise `CrawlerError` / `RobotsDenied`
 - `fetch_urls(urls: list[str]) -> dict[str, str]` — parallel GET; skip `CrawlerError` / `RobotsDenied`
 - `fetch_and_parse(url: str) -> dict` — fetch then parse; sets `status_code`, `content_type`, `crawled_at`
-- `crawl(start_urls, max_pages=100, *, max_depth=None) -> dict[str, dict]` — queue + filters + progress; clears `error_log` and rebuilds the circuit breaker; if `storage` is set, `save_many` in batches
+- `crawl(start_urls, max_pages=100, *, max_depth=None) -> dict[str, dict]` — queue + filters + progress; clears `error_log` and rebuilds the circuit breaker; if `storage` is set, `save_many` in batches then `storage.flush()`
 - `visited_urls: set[str]`, `processed_urls: dict[str, dict]`, `failed_urls: dict[str, str]`, `blocked_urls: set[str]`, `error_log: list[dict]`, `storage_errors: list[dict]`
 - `get_speed_stats() -> dict` — `requests_per_second`, `avg_delay`, `blocked`, `requests`
 - `get_error_stats() -> dict` — `by_type`, `successful_retries`, `avg_retry_time`, `permanent_error_urls`
-- `close()` — flush leftover storage rows (does **not** close `storage`), then `await session.close()`; also `async with AsyncCrawler() as c`
+- `close()` — leftover crawler rows, then `storage.flush()` (does **not** close `storage`), then `await session.close()`; also `async with AsyncCrawler() as c`
 
-Storage save failures: retry `storage_max_retries` extra times, log WARNING/ERROR, continue the crawl. HTTP `RetryStrategy` is not used for disk/DB errors.
+Storage I/O is serialized: `_storage_lock` guards `_storage_buffer`; `_storage_io_lock` guards `save_many` / `flush` so workers do not hit the same backend together (CSV header, asyncpg “another operation is in progress”).
+
+Storage save failures: retry `storage_max_retries` extra times, log WARNING/ERROR, continue the crawl. HTTP `RetryStrategy` is not used for disk/DB errors. `flush()` failures are logged the same way and do not stop the crawl.
 
 Saved record (`normalize_page` / `RECORD_FIELDS`): `{url, title, text, links, metadata, crawled_at, status_code, content_type}`. Parser extras (`images`, …) are dropped on save. `crawled_at` is ISO-8601 in JSON/CSV.
 
-`JSONStorage(path, indent=2, buffer_bytes=65536)` — JSONL; encode in a thread; RAM buffer; `close()` flushes. Use `indent=None` for compact lines.
+`JSONStorage(path, indent=2, buffer_bytes=65536)` — JSONL; encode in a thread; RAM buffer until `buffer_bytes` or `flush()` / `close()`. Use `indent=None` for compact lines.
 
 `CSVStorage(path, encoding="utf-8", buffer_bytes=65536)` — auto header; quoting; same buffer pattern.
 
-`PostgresStorage(dsn, table="pages", batch_size=100, connect=None)` — `init_db()` table + indexes; `executemany`; tests inject `connect=`. DSN is `postgresql://…`, not a `.db` file.
+`PostgresStorage(dsn, table="pages", batch_size=100, connect=None)` — `init_db()` table + indexes; `executemany`; tests inject `connect=`. DSN is `postgresql://…`, not a `.db` file. `flush()` sends the row buffer.
 
-`DataStorage` — ABC: `save`, `save_many`, `close`. Prefer `async with` on the storage object so the file/DB buffer is written.
+`DataStorage` — ABC: `save`, `save_many`, `flush`, `close`. Default `flush()` is a no-op. JSON/CSV `flush()` writes `_chunks` without closing the file. Crawler `crawl` / `close` call `flush()` so a small crawl still hits disk. Prefer `async with` on the storage object when you are done with the file/DB.
 
 Session: `ClientTimeout(total, connect, sock_read=read_timeout)` + `TCPConnector(limit, limit_per_host, ttl_dns_cache=300, enable_cleanup_closed=True)`. Each GET may pass a larger timeout: `base * timeout_backoff_factor**attempt`, capped by `timeout_max`.
 

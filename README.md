@@ -30,23 +30,26 @@ Load failures are mapped to `CrawlerError` subclasses (`TransientError`,
 | `fetch_urls(urls) -> dict[str, str]` | Parallel GET; skip `CrawlerError` / `RobotsDenied` |
 | `fetch_and_parse(url) -> dict` | Fetch + parse; add `status_code`, `content_type`, `crawled_at` |
 | `crawl(start_urls, max_pages, max_depth=)` | Walk links; fill visited/processed/failed; optional `storage.save_many` |
-| `JSONStorage` / `CSVStorage` / `PostgresStorage` | Async `save` / `save_many` / `close`; JSONL, CSV, or PostgreSQL |
+| `JSONStorage` / `CSVStorage` / `PostgresStorage` | Async `save` / `save_many` / `flush` / `close`; JSONL, CSV, or PostgreSQL |
 | `normalize_page(data)` | Standard saved fields (drops parser extras such as `images`) |
 | `error_log` | Per-try rows: `error`, `url`, `attempt`, `retry_in`, `result` (`retry` / `failure` / `success`) |
 | `get_error_stats()` | Counts by type, successful retries, average retry wait, URLs with permanent errors |
 | `get_speed_stats()` | `requests_per_second`, `avg_delay`, `blocked`, `requests` |
 | `HTMLParser.parse_html(html, url)` | Same dict from raw HTML |
-| `close()` / `async with` | Close the HTTP session |
+| `close()` / `async with` | `storage.flush()` (does not close storage), then close the HTTP session |
 
 Parser page dict: `{url, title, text, links, link_details, metadata, images, headings, tables, lists}`.
 Saved record: `{url, title, text, links, metadata, crawled_at, status_code, content_type}`.
 
 Pass `storage=` into `AsyncCrawler`. After each successful page, the crawler
 buffers rows and calls `save_many` every `storage_batch_size` pages (and at
-the end of `crawl` / `close`). Disk or DB errors are retried
-(`storage_max_retries`); they are logged and **do not stop** the crawl
-(`storage_errors`). Close the storage object yourself (`async with JSONStorage(...)`)
-so file buffers are flushed. `PostgresStorage` needs a DSN
+the end of `crawl` / `close`). Then it calls `storage.flush()` so RAM buffers
+(`JSONStorage` / `CSVStorage` `_chunks`) reach the file even when the crawl is
+small. `save_many` / `flush` run one at a time (`_storage_io_lock`). Disk or DB
+errors are retried (`storage_max_retries`); they are logged and **do not stop**
+the crawl (`storage_errors`). The crawler does **not** call `storage.close()` —
+close the storage yourself (`async with JSONStorage(...)`) when you are done
+with the file or DB. `PostgresStorage` needs a DSN
 `postgresql://user:pass@host:5432/dbname`, not a `.db` file.
 
 `crawl` prints live progress on stderr: processed count, queue size, errors,
