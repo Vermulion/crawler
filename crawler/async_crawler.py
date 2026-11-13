@@ -13,6 +13,7 @@ from typing import Optional, TYPE_CHECKING
 
 import aiohttp
 
+from crawler.sitemap_parser import SitemapParser
 from crawler.crawler_queue import CrawlerQueue
 from crawler.html_parser import HTMLParser
 from crawler.semaphore_manager import SemaphoreManager
@@ -129,6 +130,7 @@ class AsyncCrawler:
         self._agent_lock = asyncio.Lock()
         self.jitter = jitter
         self.robots = RobotsParser()
+        self.sitemap = SitemapParser()
         self.blocked_urls: set[str] = set()
         self._request_times: list[float] = []
         self._requests_done = 0
@@ -469,10 +471,27 @@ class AsyncCrawler:
         max_pages: int = 100,
         *,
         max_depth: Optional[int] = None,
+        sitemap_urls: Optional[list[str]] = None,
     ) -> dict[str, dict]:
-        """Follow links from start_urls. Fill visited / processed / failed state."""
+        """Follow links from start_urls and optional sitemap.xml URLs."""
         if max_pages < 1:
             raise ValueError("max_pages must be >= 1")
+        sitemap_urls = list(sitemap_urls or [])
+        if not start_urls and not sitemap_urls:
+            raise ValueError("need start_urls or sitemap_urls")
+        seeds = list(start_urls)
+        if sitemap_urls:
+            session = await self._get_session()
+            for sitemap_url in sitemap_urls:
+                seeds.extend(
+                    await self.sitemap.fetch_sitemap(sitemap_url, session=session)
+                )
+        unique: list[str] = []
+        seen: set[str] = set()
+        for url in seeds:
+            if url not in seen:
+                seen.add(url)
+                unique.append(url)
 
         self.visited_urls.clear()
         self.blocked_urls.clear()
@@ -491,12 +510,12 @@ class AsyncCrawler:
 
         url_filter = URLFilter(
             same_domain_only=self.same_domain_only,
-            allowed_hosts=start_urls,
+            allowed_hosts=unique,
             include_patterns=self.include_patterns,
             exclude_patterns=self.exclude_patterns,
         )
         queue = CrawlerQueue(
-            start_urls,
+            unique,
             max_pages=max_pages,
             max_depth=max_depth,
             url_filter=url_filter,

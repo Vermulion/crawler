@@ -25,6 +25,8 @@ from crawler.storage import (
     normalize_page,
 )
 from crawler.retry_strategy import RetryStrategy
+from crawler.sitemap_parser import SitemapParser
+
 
 __all__ = [
     "AsyncCrawler",
@@ -49,4 +51,5 @@ __all__ = [
     "PostgresStorage",
     "StorageError",
     "normalize_page",
+    "SitemapParser",
 ]
