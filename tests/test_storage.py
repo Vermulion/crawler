@@ -294,6 +294,87 @@ async def test_json_flush_writes_without_close(tmp_path: Path) -> None:
     await storage.close()
 
 
+class _FailingWriter:
+    def __init__(self, fail_times: int = 1) -> None:
+        self.fail_times = fail_times
+        self.calls = 0
+        self.written = ""
+
+    async def write(self, blob: str) -> None:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise OSError("disk full")
+        self.written += blob
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_json_keeps_buffer_if_write_fails() -> None:
+    storage = JSONStorage("unused.jsonl", indent=None, buffer_bytes=1_000_000)
+    writer = _FailingWriter(fail_times=1)
+    storage._fh = writer
+    await storage.save(PAGE)
+    assert storage._chunks
+    with pytest.raises(OSError, match="disk full"):
+        await storage.flush()
+    assert storage._chunks
+    await storage.flush()
+    assert storage._chunks == []
+    assert json.loads(writer.written.strip())["title"] == "Example"
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_csv_keeps_buffer_if_write_fails() -> None:
+    storage = CSVStorage("unused.csv", buffer_bytes=1_000_000)
+    writer = _FailingWriter(fail_times=1)
+    storage._fh = writer
+    storage.fieldnames = list(RECORD_FIELDS)
+    storage._header_written = True
+    await storage.save(PAGE)
+    assert storage._chunks
+    with pytest.raises(OSError, match="disk full"):
+        await storage.flush()
+    assert storage._chunks
+    await storage.flush()
+    assert storage._chunks == []
+    assert "Example" in writer.written
+    await storage.close()
+
+
+class _FailOnceConnection(FakeConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_times = 1
+
+    async def executemany(self, query: str, rows: list) -> str:
+        if self.fail_times:
+            self.fail_times -= 1
+            raise OSError("another operation is in progress")
+        return await super().executemany(query, rows)
+
+
+@pytest.mark.asyncio
+async def test_postgres_keeps_buffer_if_executemany_fails() -> None:
+    fake = _FailOnceConnection()
+    storage = _pg(fake, batch_size=100)
+    await storage.save(PAGE)
+    assert storage._buffer
+    with pytest.raises(OSError, match="another operation"):
+        await storage.flush()
+    assert storage._buffer
+    await storage.flush()
+    assert storage._buffer == []
+    inserts = [(q, rows) for q, rows in fake.statements if "INSERT INTO" in q]
+    assert len(inserts) == 1
+    await storage.close()
+
+
 @pytest.mark.asyncio
 async def test_csv_flush_writes_without_close(tmp_path: Path) -> None:
     path = tmp_path / "buf.csv"

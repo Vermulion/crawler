@@ -556,22 +556,7 @@ class AsyncCrawler:
         async with self._storage_io_lock:
             if to_flush:
                 await self._save_with_retry_locked(to_flush)
-            try:
-                await self.storage.flush()
-            except Exception as exc:
-                logger.error(
-                    "Storage flush failed [%s]: %s",
-                    type(exc).__name__,
-                    exc,
-                )
-                self.storage_errors.append(
-                    {
-                        "error": type(exc).__name__,
-                        "message": str(exc),
-                        "pages": 0,
-                        "urls": [],
-                    }
-                )
+            await self._flush_with_retry_locked()
 
     async def _save_with_retry(self, rows: list[dict]) -> None:
         async with self._storage_io_lock:
@@ -581,23 +566,57 @@ class AsyncCrawler:
         """Retry save_many. Caller must hold _storage_io_lock."""
         if self.storage is None:
             return
+
+        async def op() -> None:
+            assert self.storage is not None
+            await self.storage.save_many(rows)
+
+        await self._retry_storage_op(
+            "save",
+            op,
+            pages=len(rows),
+            urls=[row.get("url", "") for row in rows],
+        )
+
+    async def _flush_with_retry_locked(self) -> None:
+        """Retry storage.flush(). Caller must hold _storage_io_lock."""
+        if self.storage is None:
+            return
+
+        async def op() -> None:
+            assert self.storage is not None
+            await self.storage.flush()
+
+        await self._retry_storage_op("flush", op, pages=0, urls=[])
+
+    async def _retry_storage_op(
+        self,
+        op_name: str,
+        op,
+        *,
+        pages: int,
+        urls: list[str],
+    ) -> None:
+        """Retry a storage call. Log failures. Never raise — crawl must continue."""
         total = self.storage_max_retries + 1
         last_exc: BaseException | None = None
         for attempt in range(total):
             try:
-                await self.storage.save_many(rows)
+                await op()
                 if attempt:
                     logger.info(
-                        "Storage save succeeded on try %d/%d (%d pages)",
+                        "Storage %s succeeded on try %d/%d (%d pages)",
+                        op_name,
                         attempt + 1,
                         total,
-                        len(rows),
+                        pages,
                     )
                 return
             except Exception as exc:
                 last_exc = exc
                 logger.warning(
-                    "Storage save failed try %d/%d [%s]: %s",
+                    "Storage %s failed try %d/%d [%s]: %s",
+                    op_name,
                     attempt + 1,
                     total,
                     type(exc).__name__,
@@ -608,18 +627,19 @@ class AsyncCrawler:
                 delay = self.storage_backoff_factor * (2 ** attempt)
                 await asyncio.sleep(delay)
         logger.error(
-            "Storage save gave up after %d tries [%s]: %s (pages=%d)",
+            "Storage %s gave up after %d tries [%s]: %s (pages=%d)",
+            op_name,
             total,
             type(last_exc).__name__,
             last_exc,
-            len(rows),
+            pages,
         )
         self.storage_errors.append(
             {
                 "error": type(last_exc).__name__,
-                "message": str(exc) if False else str(last_exc),
-                "pages": len(rows),
-                "urls": [row.get("url", "") for row in rows],
+                "message": str(last_exc),
+                "pages": pages,
+                "urls": urls,
             }
         )
 

@@ -231,6 +231,41 @@ async def test_storage_retries_then_succeeds(caplog: pytest.LogCaptureFixture) -
     await crawler.close()
 
 
+class FlakyFlushStorage(ListStorage):
+    def __init__(self, fail_times: int) -> None:
+        super().__init__()
+        self.fail_times = fail_times
+        self.flush_calls = 0
+
+    async def flush(self) -> None:
+        self.flush_calls += 1
+        if self.flush_calls <= self.fail_times:
+            raise OSError("flush failed")
+
+
+@pytest.mark.asyncio
+async def test_storage_flush_retries_then_succeeds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    mapping = {"https://site.test/": _page("https://site.test/")}
+    storage = FlakyFlushStorage(fail_times=2)
+    with caplog.at_level("WARNING", logger="crawler.async_crawler"):
+        crawler, _session = await _crawl_with_pages(
+            mapping,
+            ["https://site.test/"],
+            max_depth=0,
+            storage=storage,
+            storage_batch_size=1,
+            storage_max_retries=3,
+            storage_backoff_factor=0.0,
+        )
+    assert len(storage.saved) == 1
+    assert storage.flush_calls == 3
+    assert crawler.storage_errors == []
+    assert "Storage flush failed" in caplog.text
+    await crawler.close()
+
+
 @pytest.mark.asyncio
 async def test_crawl_continues_when_storage_fails(caplog: pytest.LogCaptureFixture) -> None:
     mapping = {

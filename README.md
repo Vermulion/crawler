@@ -46,8 +46,10 @@ buffers rows and calls `save_many` every `storage_batch_size` pages (and at
 the end of `crawl` / `close`). Then it calls `storage.flush()` so RAM buffers
 (`JSONStorage` / `CSVStorage` `_chunks`) reach the file even when the crawl is
 small. `save_many` / `flush` run one at a time (`_storage_io_lock`). Disk or DB
-errors are retried (`storage_max_retries`); they are logged and **do not stop**
-the crawl (`storage_errors`). The crawler does **not** call `storage.close()` —
+errors (`save_many` and `flush`) are retried (`storage_max_retries`, backoff);
+they are logged and **do not stop** the crawl (`storage_errors`). Backends keep
+their RAM buffer until `write` / `executemany` succeeds, so a later `flush()`
+can still write after a failed attempt. The crawler does **not** call `storage.close()` —
 close the storage yourself (`async with JSONStorage(...)`) when you are done
 with the file or DB. `PostgresStorage` needs a DSN
 `postgresql://user:pass@host:5432/dbname`, not a `.db` file.

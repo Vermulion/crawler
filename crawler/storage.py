@@ -29,7 +29,7 @@ class DataStorage(ABC):
         """Persist one record (a page dict or a report dict)."""
 
     async def flush(self) -> None:
-        """Persist one record (a page dict or a report dict)."""
+        """Write buffered records. Do not close the file or DB connection."""
 
     @abstractmethod
     async def close(self) -> None:
@@ -200,10 +200,10 @@ class JSONStorage(DataStorage):
         if not self._chunks:
             return
         blob = "".join(self._chunks)
-        self._chunks.clear()
-        self._buffered = 0
         fh = await self._ensure_open()
         await fh.write(blob)
+        self._chunks.clear()
+        self._buffered = 0
 
     async def save(self, data: dict) -> None:
         await self.save_many([data])
@@ -285,10 +285,10 @@ class CSVStorage(DataStorage):
         if not self._chunks:
             return
         blob = "".join(self._chunks)
-        self._chunks.clear()
-        self._buffered = 0
         fh = await self._ensure_open()
         await fh.write(blob)
+        self._chunks.clear()
+        self._buffered = 0
 
     async def save(self, data: dict) -> None:
         await self.save_many([data])
@@ -395,12 +395,12 @@ class PostgresStorage(DataStorage):
             await self.init_db()
         conn = await self._get_conn()
         rows = list(self._buffer)
-        self._buffer.clear()
         await conn.executemany(
             f"INSERT INTO {self.table} (url, title, payload) "
             f"VALUES ($1, $2, $3::jsonb)",
             rows,
         )
+        self._buffer.clear()
 
     async def save(self, data: dict) -> None:
         tuples = await asyncio.to_thread(_pg_tuples, [data])
