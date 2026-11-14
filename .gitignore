@@ -35,6 +35,7 @@ htmlcov/
 
 # Local demo / scratch output
 crawl_results.json
+results.json
 error_report.json
 tmp_check_*.py
 results.jsonl

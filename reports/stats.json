@@ -1,0 +1,16 @@
+{
+  "pages_processed": 1,
+  "successful_requests": 1,
+  "failed_requests": 0,
+  "avg_pages_per_second": 0.5434464981938539,
+  "status_codes": {
+    "200": 1
+  },
+  "top_domains": [
+    [
+      "example.com",
+      1
+    ]
+  ],
+  "elapsed_seconds": 1.8401075420000002
+}

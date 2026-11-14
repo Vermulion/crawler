@@ -1,0 +1,38 @@
+crawler:
+  max_concurrent: 5
+  max_per_domain: 2
+  requests_per_second: 1.0
+  rate_limit_per_domain: true
+  min_delay: 0.0
+  jitter: 0.0
+  max_retries: 1
+  backoff_factor: 0.5
+  user_agent: AsyncCrawler
+  respect_robots: true
+
+start_urls:
+  - https://example.com
+
+sitemap_urls: []
+
+crawl:
+  max_pages: 20
+  max_depth: 1
+
+filters:
+  same_domain_only: true
+  include_patterns: []
+  exclude_patterns:
+    - "\\.pdf$"
+    - "/secret"
+
+storage:
+  type: json          # json | csv | postgres | none
+  path: results.jsonl
+  indent: null        # compact JSONL
+  batch_size: 10
+  max_retries: 2
+  backoff_factor: 0.5
+  # Postgres (docker compose). Set type: postgres and comment out path/indent.
+  # dsn: postgresql://crawler:crawler@localhost:5432/crawler
+  # table: pages

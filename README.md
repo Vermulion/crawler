@@ -93,6 +93,16 @@ PYTHONPATH=. python examples/fetch_example.py
 
 Crawl demo (needs network; live progress; writes `crawl_results.json`):
 
+Command line (`argparse`). Flags override `--config` when both are set:
+
+```bash
+PYTHONPATH=. python crawler.py --urls https://example.com --max-pages 100 --output results.json
+PYTHONPATH=. python crawler.py --config examples/crawler.yaml --output results.json
+PYTHONPATH=. python crawler.py --urls https://example.com --no-respect-robots --rate-limit 2
+```
+
+`--respect-robots` is on by default; `--no-respect-robots` skips `robots.txt`. `--output` is a JSON summary of the crawl (pages, failures, stats). YAML `storage:` still saves during the crawl if you pass `--config`.
+
 ```bash
 PYTHONPATH=. python examples/crawl_demo.py
 ```

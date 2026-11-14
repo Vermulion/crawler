@@ -72,6 +72,7 @@ class AsyncCrawler:
         storage_batch_size: int = 1,
         storage_max_retries: int = 2,
         storage_backoff_factor: float = 0.5,
+        respect_robots: bool = True,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
@@ -131,6 +132,7 @@ class AsyncCrawler:
         self._agent_lock = asyncio.Lock()
         self.jitter = jitter
         self.robots = RobotsParser()
+        self.respect_robots = respect_robots
         self.sitemap = SitemapParser()
         self.blocked_urls: set[str] = set()
         self._request_times: list[float] = []
@@ -333,12 +335,14 @@ class AsyncCrawler:
         """
         session = await self._get_session()
         agent = await self._next_user_agent()
-        await self._ensure_robots(url, agent)
-        if not self.robots.can_fetch(url, agent):
-            self.blocked_urls.add(url)
-            logger.warning("Blocked by robots.txt: %s [%s]", url, agent)
-            raise RobotsDenied(url)
-        delay = self.robots.get_crawl_delay(url, agent)
+        delay = 0.0
+        if self.respect_robots:
+            await self._ensure_robots(url, agent)
+            if not self.robots.can_fetch(url, agent):
+                self.blocked_urls.add(url)
+                logger.warning("Blocked by robots.txt: %s [%s]", url, agent)
+                raise RobotsDenied(url)
+            delay = self.robots.get_crawl_delay(url, agent)
         host = SemaphoreManager._host(url)
         if not self.circuit_breaker.allow(host):
             logger.warning("Circuit open for %s; skipping %s", host, url)

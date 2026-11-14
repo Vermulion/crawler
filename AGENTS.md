@@ -39,6 +39,9 @@ crawler/                 # importable package
   circuit_breaker.py     # per-domain open / half-open / closed
   errors.py              # CrawlerError tree + classify_status / classify_exception
   storage.py             # DataStorage ABC; JSON / CSV / Postgres; normalize_page
+  config.py              # YAML/JSON → CrawlerConfig / crawler_from_config
+  cli.py                 # argparse CLI
+  __main__.py            # python -m crawler
 tests/                   # pytest (no network)
 examples/
   fetch_example.py
@@ -49,15 +52,18 @@ examples/
   error_demo.py          # mixed HTTP errors + retries + error_report.json
   storage_demo.py        # crawl → JSONL + CSV; Postgres if DATABASE_URL
 docker-compose.yml       # optional local Postgres for the storage demo
+crawler.py               # python crawler.py --urls ...
 requirements.txt
 requirements-dev.txt
 ```
 
 ## Current API
 
-`AsyncCrawler(max_concurrent=10, max_per_domain=2, *, connect_timeout=10, read_timeout=30, total_timeout=60, timeout_backoff_factor=2, timeout_max=120, pool_limit=100, pool_limit_per_host=max_concurrent, same_domain_only=True, include_patterns=None, exclude_patterns=None, requests_per_second=1.0, rate_limit_per_domain=True, min_delay=0, jitter=0, max_retries=0, backoff_factor=0.5, backoff_max=30, retry_strategy=None, circuit_breaker=None, failure_threshold=5, failure_window=60, recovery_timeout=30, user_agent="AsyncCrawler", user_agents=None, storage=None, storage_batch_size=1, storage_max_retries=2, storage_backoff_factor=0.5)`
+`AsyncCrawler(max_concurrent=10, max_per_domain=2, *, connect_timeout=10, read_timeout=30, total_timeout=60, timeout_backoff_factor=2, timeout_max=120, pool_limit=100, pool_limit_per_host=max_concurrent, same_domain_only=True, include_patterns=None, exclude_patterns=None, requests_per_second=1.0, rate_limit_per_domain=True, min_delay=0, jitter=0, max_retries=0, backoff_factor=0.5, backoff_max=30, retry_strategy=None, circuit_breaker=None, failure_threshold=5, failure_window=60, recovery_timeout=30, user_agent="AsyncCrawler", user_agents=None, storage=None, storage_batch_size=1, storage_max_retries=2, storage_backoff_factor=0.5, respect_robots=True)`
 
-- `fetch_url(url: str) -> str` — GET one URL; robots.txt; circuit breaker; rate limiter; `SemaphoreManager.limit(url)`; per-try timeout; `RetryStrategy`; `_record` into `error_log`; re-raise `CrawlerError` / `RobotsDenied`
+CLI: `python crawler.py` or `python -m crawler --urls URL [--max-pages N] [--max-depth N] [--output results.json] [--config FILE] [--respect-robots|--no-respect-robots] [--rate-limit RPS]`. Flags override the config file. `--output` writes processed/failed/stats JSON (does **not** close YAML `storage`; CLI still `storage.close()` after crawl).
+
+- `fetch_url(url: str) -> str` — GET one URL; `respect_robots` then robots.txt; circuit breaker; rate limiter; `SemaphoreManager.limit(url)`; per-try timeout; `RetryStrategy`; `_record` into `error_log`; re-raise `CrawlerError` / `RobotsDenied`
 - `fetch_urls(urls: list[str]) -> dict[str, str]` — parallel GET; skip `CrawlerError` / `RobotsDenied`
 - `fetch_and_parse(url: str) -> dict` — fetch then parse; sets `status_code`, `content_type`, `crawled_at`
 - `crawl(start_urls, max_pages=100, *, max_depth=None) -> dict[str, dict]` — queue + filters + progress; clears `error_log` and rebuilds the circuit breaker; if `storage` is set, `save_many` in batches then `storage.flush()`
@@ -126,4 +132,4 @@ Parser page dict: `{url, title, text, links, link_details, metadata, images, hea
 
 ## Next likely steps
 
-robots.txt refresh, configurable respect_robots flag.
+robots.txt cache refresh.
