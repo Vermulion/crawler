@@ -26,7 +26,7 @@ from crawler.storage import (
 )
 from crawler.retry_strategy import RetryStrategy
 from crawler.sitemap_parser import SitemapParser
-
+from crawler.crawler_stats import CrawlerStats
 
 __all__ = [
     "AsyncCrawler",
@@ -52,4 +52,5 @@ __all__ = [
     "StorageError",
     "normalize_page",
     "SitemapParser",
+    "CrawlerStats",
 ]

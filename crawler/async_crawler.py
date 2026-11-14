@@ -24,6 +24,7 @@ from crawler.circuit_breaker import CircuitBreaker
 from crawler.errors import CrawlerError, TransientError, classify_exception, CircuitOpenError
 from crawler.retry_strategy import RetryStrategy
 from crawler.storage import DataStorage
+from crawler.crawler_stats import CrawlerStats
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,7 @@ class AsyncCrawler:
         self.storage_max_retries = storage_max_retries
         self.storage_backoff_factor = storage_backoff_factor
         self.storage_errors: list[dict] = []
+        self.stats = CrawlerStats(self)
 
     def _print_progress(self, queue: CrawlerQueue, *, start: float) -> None:
         stats = queue.get_stats()
@@ -214,6 +216,10 @@ class AsyncCrawler:
             "avg_retry_time": avg_retry,
             "permanent_error_urls": sorted(permanent),
         }
+
+    def get_crawler_stats(self) -> dict:
+        """Pages, success/fail, speed, status codes, top domains, elapsed time."""
+        return self.stats.summary()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
