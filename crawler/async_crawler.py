@@ -682,3 +682,9 @@ class AsyncCrawler:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
+
+    def export_to_json(self, filename: str) -> str:
+        return self.stats.export_to_json(filename)
+
+    def export_to_html_report(self, filename: str) -> str:
+        return self.stats.export_to_html_report(filename)

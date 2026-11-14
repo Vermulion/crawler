@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+import json
+from pathlib import Path
 from crawler.crawler_stats import CrawlerStats
 from tests.http_fakes import FakeResponse, FakeSession, http_error
 from tests.test_crawl import _crawl_with_pages, _page
@@ -60,3 +62,30 @@ def test_stats_empty_crawler() -> None:
     assert stats["failed_requests"] == 0
     assert stats["status_codes"] == {}
     assert stats["top_domains"] == []
+
+@pytest.mark.asyncio
+async def test_export_json_and_html(tmp_path: Path) -> None:
+    mapping = {
+        "https://site.test/": _page("https://site.test/", "https://site.test/b"),
+        "https://site.test/b": _page("https://site.test/b"),
+    }
+    crawler, _session = await _crawl_with_pages(
+        mapping, ["https://site.test/"], max_depth=1
+    )
+    json_path = tmp_path / "stats.json"
+    html_path = tmp_path / "stats.html"
+    charts_dir = tmp_path / "charts"
+    crawler.stats.export_to_json(str(json_path))
+    crawler.stats.export_to_html_report(str(html_path))
+    saved = crawler.stats.export_charts(str(charts_dir))
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert data["pages_processed"] == 2
+    assert data["top_domains"][0][0] == "site.test"
+    html = html_path.read_text(encoding="utf-8")
+    assert "<table>" in html
+    assert "data:image/png;base64," in html
+    assert "site.test" in html
+    assert set(saved) == {"status_codes", "top_domains", "success_fail"}
+    for path in saved.values():
+        assert Path(path).stat().st_size > 0
+    await crawler.close()
