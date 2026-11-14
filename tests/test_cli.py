@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import logging
 
+from crawler.async_crawler import AsyncCrawler
+from crawler.cli import parse_args, run
 from crawler.cli import build_from_args, parse_args, write_results
 from tests.http_fakes import FakeSession
 from tests.test_politeness import _crawler, _pages
@@ -113,3 +116,18 @@ async def test_respect_robots_false_fetches_disallowed() -> None:
     assert body == "ok"
     assert crawler.blocked_urls == set()
     await crawler.close()
+
+@pytest.mark.asyncio
+async def test_run_configures_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "cli.log"
+    async def fake_crawl(self, *args, **kwargs):
+        logging.getLogger("crawler.cli_probe").info("probe-from-run")
+        return {}
+    monkeypatch.setattr(AsyncCrawler, "crawl", fake_crawl)
+    args = parse_args(
+        ["--urls", "https://a.test/", "--log-level", "INFO", "--log-file", str(path)]
+    )
+    await run(args)
+    text = path.read_text(encoding="utf-8")
+    assert "probe-from-run" in text
+    logging.getLogger("crawler").handlers.clear()

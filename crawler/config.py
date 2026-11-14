@@ -51,6 +51,10 @@ class CrawlerConfig:
     max_pages: int = 100
     max_depth: Optional[int] = None
     storage: Optional[DataStorage] = None
+    log_level: str = "INFO"
+    log_file: str | None = "crawler.log"
+    log_max_bytes: int = 1_000_000
+    log_backup_count: int = 3
 
 
 def load_config(path: str | Path) -> CrawlerConfig:
@@ -62,6 +66,7 @@ def load_config(path: str | Path) -> CrawlerConfig:
     filters = dict(raw.get("filters") or {})
     crawl = dict(raw.get("crawl") or {})
     storage_raw = dict(raw.get("storage") or {})
+    logging_raw = dict(raw.get("logging") or {})
 
     unknown = set(crawler) - _CRAWLER_KEYS
     if unknown:
@@ -95,6 +100,10 @@ def load_config(path: str | Path) -> CrawlerConfig:
         max_pages=int(crawl.get("max_pages") or 100),
         max_depth=None if depth is None else int(depth),
         storage=storage,
+        log_level=str(logging_raw.get("level") or "INFO"),
+        log_file=logging_raw.get("file", "crawler.log"),
+        log_max_bytes=int(logging_raw.get("max_bytes") or 1_000_000),
+        log_backup_count=int(logging_raw.get("backup_count") or 3),
     )
 
 

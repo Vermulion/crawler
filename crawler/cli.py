@@ -13,6 +13,8 @@ from typing import Any, Optional, Sequence
 from crawler.async_crawler import AsyncCrawler
 from crawler.config import CrawlerConfig, crawler_from_config
 from crawler.storage import normalize_page
+from crawler.log_setup import setup_logging
+
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -46,6 +48,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=None,
         metavar="RPS",
         help="Requests per second (overrides config)",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        help="DEBUG, INFO, WARNING, or ERROR",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="Log file (default crawler.log)",
     )
     return parser.parse_args(argv)
 
@@ -105,8 +117,21 @@ def build_from_args(args: argparse.Namespace) -> tuple[AsyncCrawler, CrawlerConf
     return crawler, cfg
 
 
+def _apply_logging(args: argparse.Namespace, cfg: CrawlerConfig) -> None:
+    setup_logging(
+        level=args.log_level or getattr(cfg, "log_level", "INFO"),
+        log_file=(
+            args.log_file
+            if args.log_file is not None
+            else getattr(cfg, "log_file", "crawler.log")
+        ),
+        max_bytes=getattr(cfg, "log_max_bytes", 1_000_000),
+        backup_count=getattr(cfg, "log_backup_count", 3),
+    )
+
 async def run(args: argparse.Namespace) -> int:
     crawler, cfg = build_from_args(args)
+    _apply_logging(args, cfg)
     async with crawler:
         await crawler.crawl(
             cfg.start_urls,
