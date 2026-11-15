@@ -161,22 +161,64 @@ class AsyncCrawler:
         self.storage_errors: list[dict] = []
         self.stats = CrawlerStats(self)
 
-    def _print_progress(self, queue: CrawlerQueue, *, start: float) -> None:
+    def _progress_snapshot(self, queue: CrawlerQueue, *, start: float) -> dict:
         stats = queue.get_stats()
-        processed = stats["processed"]
-        pending = stats["pending"]
-        errors = stats["failed"]
         elapsed = time.monotonic() - start
+        processed = stats["processed"]
+        failed = stats["failed"]
+        done = processed + failed
+        pending = stats["pending"]
+        active = stats["in_progress"]
+        cap = max(done + pending + active, 1)
         speed = processed / elapsed if elapsed > 0 else 0.0
+        remaining = pending + active
+        eta = remaining / speed if speed > 0 else None
+        return {
+            "processed": processed,
+            "failed": failed,
+            "done": done,
+            "cap": cap,
+            "pending": pending,
+            "active": active,
+            "speed": speed,
+            "eta": eta,
+            "elapsed": elapsed,
+        }
+
+    @staticmethod
+    def _format_eta(seconds: float | None) -> str:
+        if seconds is None:
+            return "--"
+        total = int(max(0.0, seconds) + 0.5)
+        mins, sec = divmod(total, 60)
+        hours, mins = divmod(mins, 60)
+        if hours:
+            return f"{hours:d}:{mins:02d}:{sec:02d}"
+        return f"{mins:d}:{sec:02d}"
+
+    @staticmethod
+    def _bar(done: int, cap: int, width: int = 20) -> str:
+        if cap < 1:
+            cap = 1
+        filled = min(width, int(width * done / cap))
+        return "#" * filled + "-" * (width - filled)
+
+    def _print_progress(self, queue: CrawlerQueue, *, start: float) -> None:
+        snap = self._progress_snapshot(queue, start=start)
         extra = self.get_speed_stats()
+        frac = min(1.0, snap["done"] / snap["cap"])
         line = (
-            f"processed={processed}  queue={pending}  "
-            f"errors={errors}  speed={speed:.2f} pages/s  "
-            f"req/s={extra['requests_per_second']:.2f}  "
-            f"avg_delay={extra['avg_delay']:.2f}s  "
-            f"robots_blocked={extra['blocked']}"
+            f"[{self._bar(snap['done'], snap['cap'])}] "
+            f"{100 * frac:5.1f}%  "
+            f"{snap['done']}/{snap['cap']}  "
+            f"{snap['speed']:.2f} pages/s  "
+            f"ETA {self._format_eta(snap['eta'])}  "
+            f"active={snap['active']}  "
+            f"queue={snap['pending']}  "
+            f"err={snap['failed']}  "
+            f"robots={extra['blocked']}"
         )
-        print(f"\r{line:<80}", end="", file=sys.stderr, flush=True)
+        print(f"\r{line:<120}", end="", file=sys.stderr, flush=True)
 
     def get_speed_stats(self) -> dict:
         elapsed = time.monotonic() - self._stats_start
