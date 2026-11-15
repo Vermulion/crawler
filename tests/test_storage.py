@@ -229,6 +229,8 @@ async def test_postgres_save_many() -> None:
             {"url": "https://b.test/", "title": "B"},
         ]
     )
+    assert [q for q, _ in fake.statements if "INSERT INTO" in q] == []
+    await storage.flush()
     inserts = [(q, rows) for q, rows in fake.statements if "INSERT INTO" in q]
     assert len(inserts[0][1]) == 2
     await storage.close()
@@ -325,7 +327,9 @@ async def test_json_keeps_buffer_if_write_fails() -> None:
     assert storage._chunks
     await storage.flush()
     assert storage._chunks == []
-    assert json.loads(writer.written.strip())["title"] == "Example"
+    lines = writer.written.strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["title"] == "Example"
     await storage.close()
 
 
@@ -343,7 +347,7 @@ async def test_csv_keeps_buffer_if_write_fails() -> None:
     assert storage._chunks
     await storage.flush()
     assert storage._chunks == []
-    assert "Example" in writer.written
+    assert writer.written.count("Example") == 1
     await storage.close()
 
 
@@ -372,6 +376,23 @@ async def test_postgres_keeps_buffer_if_executemany_fails() -> None:
     assert storage._buffer == []
     inserts = [(q, rows) for q, rows in fake.statements if "INSERT INTO" in q]
     assert len(inserts) == 1
+    assert len(inserts[0][1]) == 1
+    assert json.loads(inserts[0][1][0][2])["title"] == "Example"
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_json_retry_flush_does_not_encode_batch_twice() -> None:
+    """After a failed write, flush again — do not call save_many again."""
+    storage = JSONStorage("unused.jsonl", indent=None)
+    writer = _FailingWriter(fail_times=1)
+    storage._fh = writer
+    await storage.save_many([PAGE])
+    with pytest.raises(OSError):
+        await storage.flush()
+    await storage.flush()
+    lines = [ln for ln in writer.written.strip().splitlines() if ln]
+    assert len(lines) == 1
     await storage.close()
 
 

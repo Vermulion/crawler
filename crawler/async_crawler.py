@@ -563,20 +563,18 @@ class AsyncCrawler:
             await self._save_with_retry_locked(rows)
 
     async def _save_with_retry_locked(self, rows: list[dict]) -> None:
-        """Retry save_many. Caller must hold _storage_io_lock."""
+        """Put rows in the backend buffer once, then retry flush() only."""
         if self.storage is None:
             return
-
-        async def op() -> None:
-            assert self.storage is not None
+        try:
             await self.storage.save_many(rows)
-
-        await self._retry_storage_op(
-            "save",
-            op,
-            pages=len(rows),
-            urls=[row.get("url", "") for row in rows],
-        )
+        except Exception as exc:
+            logger.warning(
+                "Storage save failed [%s]: %s — will retry flush",
+                type(exc).__name__,
+                exc,
+            )
+        await self._flush_with_retry_locked()
 
     async def _flush_with_retry_locked(self) -> None:
         """Retry storage.flush(). Caller must hold _storage_io_lock."""

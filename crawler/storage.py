@@ -216,8 +216,6 @@ class JSONStorage(DataStorage):
         )
         self._chunks.append(text)
         self._buffered += len(text.encode("utf-8"))
-        if self._buffered >= self.buffer_bytes:
-            await self._flush_file()
 
     async def close(self) -> None:
         await self._flush_file()
@@ -310,8 +308,6 @@ class CSVStorage(DataStorage):
             self._header_written = True
         self._chunks.append(text)
         self._buffered += len(text.encode(self.encoding, errors="replace"))
-        if self._buffered >= self.buffer_bytes:
-            await self._flush_file()
 
     async def close(self) -> None:
         await self._flush_file()
@@ -413,7 +409,6 @@ class PostgresStorage(DataStorage):
             return
         tuples = await asyncio.to_thread(_pg_tuples, rows)
         self._buffer.extend(tuples)
-        await self.flush()
 
     async def close(self) -> None:
         await self.flush()

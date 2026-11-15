@@ -68,7 +68,7 @@ requirements-dev.txt
 
 Storage I/O is serialized: `_storage_lock` guards `_storage_buffer`; `_storage_io_lock` guards `save_many` / `flush` so workers do not hit the same backend together (CSV header, asyncpg “another operation is in progress”).
 
-Storage `save_many` and `flush()` failures: retry `storage_max_retries` extra times with `storage_backoff_factor` delay, log WARNING/ERROR, continue the crawl. HTTP `RetryStrategy` is not used for disk/DB errors. JSON/CSV/Postgres clear their RAM buffers only **after** a successful `write` / `executemany`, so a later `flush()` / `close()` can still persist the same rows.
+`save_many` only appends to the backend RAM buffer (no disk/DB I/O). Crawler retries **`flush()`** only (`storage_max_retries`, backoff), so a failed `write` / `executemany` is not followed by a second `extend`/`append` of the same batch. JSON/CSV/Postgres clear buffers only **after** a successful write. HTTP `RetryStrategy` is not used for disk/DB errors. Crawl continues after storage errors (`storage_errors`).
 
 Saved record (`normalize_page` / `RECORD_FIELDS`): `{url, title, text, links, metadata, crawled_at, status_code, content_type}`. Parser extras (`images`, …) are dropped on save. `crawled_at` is ISO-8601 in JSON/CSV.
 

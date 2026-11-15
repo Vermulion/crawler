@@ -9,8 +9,9 @@ from pathlib import Path
 import pytest
 
 from crawler import AsyncCrawler
-from crawler.storage import RECORD_FIELDS, DataStorage, JSONStorage
+from crawler.storage import RECORD_FIELDS, DataStorage, JSONStorage, PostgresStorage
 from tests.http_fakes import FakeResponse, FakeSession
+from tests.test_storage import _FailOnceConnection, _FailingWriter
 
 class ListStorage(DataStorage):
     """In-memory backend so tests stay offline."""
@@ -197,23 +198,38 @@ async def test_crawl_respects_include_whitelist() -> None:
     assert "https://site.test/about" not in crawler.visited_urls
     await crawler.close()
 
-class FlakyStorage(ListStorage):
-    def __init__(self, fail_times: int) -> None:
-        super().__init__()
-        self.fail_times = fail_times
-        self.calls = 0
+class BufferThenFlushStorage(DataStorage):
+    """Like JSON/CSV/Postgres: save_many only buffers; flush writes."""
+
+    def __init__(self, flush_fail_times: int = 0) -> None:
+        self._pending: list[dict] = []
+        self.saved: list[dict] = []
+        self.save_many_calls = 0
+        self.flush_calls = 0
+        self.flush_fail_times = flush_fail_times
+
+    async def save(self, data: dict) -> None:
+        await self.save_many([data])
 
     async def save_many(self, rows: list[dict]) -> None:
-        self.calls += 1
-        if self.calls <= self.fail_times:
-            raise OSError("disk full")
-        await super().save_many(rows)
+        self.save_many_calls += 1
+        self._pending.extend(rows)
+
+    async def flush(self) -> None:
+        self.flush_calls += 1
+        if self.flush_calls <= self.flush_fail_times:
+            raise OSError("flush failed")
+        self.saved.extend(self._pending)
+        self._pending.clear()
+
+    async def close(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
 async def test_storage_retries_then_succeeds(caplog: pytest.LogCaptureFixture) -> None:
     mapping = {"https://site.test/": _page("https://site.test/")}
-    storage = FlakyStorage(fail_times=2)
+    storage = BufferThenFlushStorage(flush_fail_times=2)
     with caplog.at_level("WARNING", logger="crawler.async_crawler"):
         crawler, _session = await _crawl_with_pages(
             mapping,
@@ -224,23 +240,11 @@ async def test_storage_retries_then_succeeds(caplog: pytest.LogCaptureFixture) -
             storage_max_retries=3,
             storage_backoff_factor=0.0,
         )
-    assert len(storage.saved) == 1
-    assert storage.calls == 3
+    assert storage.save_many_calls == 1
+    assert [row["url"] for row in storage.saved] == ["https://site.test/"]
     assert crawler.storage_errors == []
-    assert "Storage save failed" in caplog.text
+    assert "Storage flush failed" in caplog.text
     await crawler.close()
-
-
-class FlakyFlushStorage(ListStorage):
-    def __init__(self, fail_times: int) -> None:
-        super().__init__()
-        self.fail_times = fail_times
-        self.flush_calls = 0
-
-    async def flush(self) -> None:
-        self.flush_calls += 1
-        if self.flush_calls <= self.fail_times:
-            raise OSError("flush failed")
 
 
 @pytest.mark.asyncio
@@ -248,7 +252,7 @@ async def test_storage_flush_retries_then_succeeds(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     mapping = {"https://site.test/": _page("https://site.test/")}
-    storage = FlakyFlushStorage(fail_times=2)
+    storage = BufferThenFlushStorage(flush_fail_times=2)
     with caplog.at_level("WARNING", logger="crawler.async_crawler"):
         crawler, _session = await _crawl_with_pages(
             mapping,
@@ -260,9 +264,30 @@ async def test_storage_flush_retries_then_succeeds(
             storage_backoff_factor=0.0,
         )
     assert len(storage.saved) == 1
-    assert storage.flush_calls == 3
+    assert storage.flush_calls >= 3
     assert crawler.storage_errors == []
     assert "Storage flush failed" in caplog.text
+    await crawler.close()
+
+
+@pytest.mark.asyncio
+async def test_crawl_storage_retry_does_not_duplicate() -> None:
+    mapping = {
+        "https://site.test/": _page("https://site.test/", "https://site.test/b"),
+        "https://site.test/b": _page("https://site.test/b"),
+    }
+    storage = BufferThenFlushStorage(flush_fail_times=2)
+    crawler, _session = await _crawl_with_pages(
+        mapping,
+        ["https://site.test/"],
+        max_depth=1,
+        storage=storage,
+        storage_batch_size=2,
+        storage_max_retries=3,
+        storage_backoff_factor=0.0,
+    )
+    urls = [row["url"] for row in storage.saved]
+    assert sorted(urls) == ["https://site.test/", "https://site.test/b"]
     await crawler.close()
 
 
@@ -272,7 +297,7 @@ async def test_crawl_continues_when_storage_fails(caplog: pytest.LogCaptureFixtu
         "https://site.test/": _page("https://site.test/", "https://site.test/b"),
         "https://site.test/b": _page("https://site.test/b"),
     }
-    storage = FlakyStorage(fail_times=99)
+    storage = BufferThenFlushStorage(flush_fail_times=99)
     with caplog.at_level("ERROR", logger="crawler.async_crawler"):
         crawler, _session = await _crawl_with_pages(
             mapping,
@@ -287,8 +312,59 @@ async def test_crawl_continues_when_storage_fails(caplog: pytest.LogCaptureFixtu
     assert "https://site.test/b" in crawler.processed_urls
     assert storage.saved == []
     assert crawler.storage_errors
-    assert "Storage save gave up" in caplog.text
+    assert "Storage flush gave up" in caplog.text
     await crawler.close()
+
+
+@pytest.mark.asyncio
+async def test_crawl_json_flush_retry_writes_one_line() -> None:
+    mapping = {"https://site.test/": _page("https://site.test/")}
+    storage = JSONStorage("unused.jsonl", indent=None, buffer_bytes=1_000_000)
+    writer = _FailingWriter(fail_times=2)
+    storage._fh = writer
+    crawler, _session = await _crawl_with_pages(
+        mapping,
+        ["https://site.test/"],
+        max_depth=0,
+        storage=storage,
+        storage_batch_size=1,
+        storage_max_retries=3,
+        storage_backoff_factor=0.0,
+    )
+    await crawler.close()
+    lines = [ln for ln in writer.written.strip().splitlines() if ln]
+    assert len(lines) == 1
+    assert json.loads(lines[0])["url"] == "https://site.test/"
+
+
+@pytest.mark.asyncio
+async def test_crawl_postgres_flush_retry_inserts_once() -> None:
+    mapping = {"https://site.test/": _page("https://site.test/")}
+    fake = _FailOnceConnection()
+
+    async def connect(dsn: str):
+        return fake
+
+    storage = PostgresStorage(
+        "postgresql://crawler:crawler@127.0.0.1:5432/crawler",
+        connect=connect,
+        batch_size=100,
+    )
+    crawler, _session = await _crawl_with_pages(
+        mapping,
+        ["https://site.test/"],
+        max_depth=0,
+        storage=storage,
+        storage_batch_size=1,
+        storage_max_retries=3,
+        storage_backoff_factor=0.0,
+    )
+    await crawler.close()
+    inserts = [(q, rows) for q, rows in fake.statements if "INSERT INTO" in q]
+    assert len(inserts) == 1
+    assert len(inserts[0][1]) == 1
+    assert inserts[0][1][0][0] == "https://site.test/"
+
 
 @pytest.mark.asyncio
 async def test_crawler_close_flushes_json_file(tmp_path: Path) -> None:
