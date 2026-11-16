@@ -28,6 +28,7 @@ from crawler.retry_strategy import RetryStrategy
 from crawler.sitemap_parser import SitemapParser
 from crawler.crawler_stats import CrawlerStats
 from crawler.config import CrawlerConfig, crawler_from_config, load_config
+from crawler.advanced_crawler import AdvancedCrawler
 
 __all__ = [
     "AsyncCrawler",
@@ -57,4 +58,5 @@ __all__ = [
     "CrawlerConfig",
     "crawler_from_config",
     "load_config",
+    "AdvancedCrawler",
 ]

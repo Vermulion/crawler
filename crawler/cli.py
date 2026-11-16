@@ -14,6 +14,7 @@ from crawler.async_crawler import AsyncCrawler
 from crawler.config import CrawlerConfig, crawler_from_config
 from crawler.storage import normalize_page
 from crawler.log_setup import setup_logging
+from crawler.advanced_crawler import AdvancedCrawler
 
 
 
@@ -92,6 +93,9 @@ def build_from_args(args: argparse.Namespace) -> tuple[AsyncCrawler, CrawlerConf
     cfg: Optional[CrawlerConfig] = None
     if args.config:
         crawler, cfg = crawler_from_config(args.config)
+        adv = AdvancedCrawler.from_config(args.config, setup_logs=False)
+        crawler, cfg = adv.crawler, adv.cfg
+
     else:
         crawler = AsyncCrawler()
         cfg = CrawlerConfig(crawler_kwargs={})

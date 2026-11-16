@@ -12,6 +12,8 @@ crawler:
 
 start_urls:
   - https://example.com
+  - https://www.google.com
+  - https://www.yahoo.com
 
 sitemap_urls: []
 
