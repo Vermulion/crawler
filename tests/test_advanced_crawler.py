@@ -38,4 +38,10 @@ async def test_advanced_crawl_and_stats(tmp_path: Path) -> None:
     json_path = tmp_path / "s.json"
     bot.export_stats(json_path=str(json_path))
     assert json_path.exists()
+    assert stats["total_pages"] == stats["pages_processed"]
+    assert stats["successful"] == stats["successful_requests"]
+    assert stats["failed"] == stats["failed_requests"]
+    html_path = tmp_path / "report.html"
+    bot.export_to_html_report(str(html_path))
+    assert html_path.exists()
     await bot.close()

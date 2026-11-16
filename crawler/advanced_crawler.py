@@ -109,3 +109,6 @@ class AdvancedCrawler:
 
     async def __aexit__(self, *args: object) -> None:
         await self.close()
+
+    def export_to_html_report(self, filename: str) -> str:
+        return self.crawler.stats.export_to_html_report(filename)

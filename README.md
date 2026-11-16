@@ -7,12 +7,13 @@ temporary failures, and can save pages to JSONL, CSV, or PostgreSQL.
 
 ## What it does
 
-Public classes: `AsyncCrawler`, `HTMLParser`, `CrawlerQueue`, `URLFilter`,
-`SemaphoreManager`, `RateLimiter`, `RobotsParser`, `RetryStrategy`,
-`CircuitBreaker`, `DataStorage`, `JSONStorage`, `CSVStorage`,
-`PostgresStorage`. `RobotsDenied` is raised when `robots.txt` forbids a URL.
+Public classes: `AsyncCrawler`, `AdvancedCrawler`, `HTMLParser`, `CrawlerQueue`,
+`URLFilter`, `SemaphoreManager`, `RateLimiter`, `RobotsParser`, `RetryStrategy`,
+`CircuitBreaker`, `SitemapParser`, `CrawlerStats`, `CrawlerConfig`,
+`DataStorage`, `JSONStorage`, `CSVStorage`, `PostgresStorage`.
+`RobotsDenied` is raised when `robots.txt` forbids a URL.
 `StorageError` is raised for bad save input. `normalize_page()` builds the
-saved record.
+saved record. `load_config` / `crawler_from_config` read YAML or JSON.
 Load failures are mapped to `CrawlerError` subclasses (`TransientError`,
 `PermanentError`, `NetworkError`, `ParseError`, `CircuitOpenError`).
 
@@ -29,7 +30,11 @@ Load failures are mapped to `CrawlerError` subclasses (`TransientError`,
 | `fetch_url(url) -> str` | GET one page; robots + rate limit + retries; log each try; re-raise `CrawlerError` / `RobotsDenied` |
 | `fetch_urls(urls) -> dict[str, str]` | Parallel GET; skip `CrawlerError` / `RobotsDenied` |
 | `fetch_and_parse(url) -> dict` | Fetch + parse; add `status_code`, `content_type`, `crawled_at` |
-| `crawl(start_urls, max_pages, max_depth=)` | Walk links; fill visited/processed/failed; optional `storage.save_many` |
+| `crawl(start_urls, max_pages, max_depth=, sitemap_urls=)` | Walk links; optional sitemap.xml seeds; fill visited/processed/failed; optional `storage.save_many` |
+| `SitemapParser` | Fetch sitemap.xml; urlset pages; follow sitemapindex |
+| `CrawlerStats` / `get_crawler_stats()` | Snapshot: pages, errors, status codes, top domains; JSON/HTML/PNG export |
+| `AdvancedCrawler` | Config + logs + crawl + `get_stats()` + HTML report |
+| `load_config` / `crawler_from_config` | YAML/JSON → `CrawlerConfig` + `AsyncCrawler` |
 | `JSONStorage` / `CSVStorage` / `PostgresStorage` | Async `save` / `save_many` / `flush` / `close`; JSONL, CSV, or PostgreSQL |
 | `normalize_page(data)` | Standard saved fields (drops parser extras such as `images`) |
 | `error_log` | Per-try rows: `error`, `url`, `attempt`, `retry_in`, `result` (`retry` / `failure` / `success`) |
@@ -74,10 +79,12 @@ Backoff wait after failure *n* (0-based): `backoff_factor * 2**n`, capped by
 
 Logging (`crawler.async_crawler`): start of a URL load (try number and timeout),
 success (byte count), each error row (`url`, `error`, `attempt`, `retry_in`,
-`result`), and `Blocked by robots.txt`.
+`result`), and `Blocked by robots.txt`. `setup_logging` (used by the CLI and
+`AdvancedCrawler`) also writes a rotating `crawler.log` plus the console.
 
-There is no `respect_robots` flag. Every `fetch_url` loads `robots.txt` once
-per origin and skips disallowed paths.
+`respect_robots=True` by default. Every `fetch_url` loads `robots.txt` once
+per origin and skips disallowed paths. Pass `respect_robots=False` or
+`--no-respect-robots` to skip that check.
 
 ## How to start
 
@@ -93,8 +100,6 @@ Tiny fetch:
 PYTHONPATH=. python examples/fetch_example.py
 ```
 
-Crawl demo (needs network; live progress; writes `crawl_results.json`):
-
 Command line (`argparse`). Flags override `--config` when both are set:
 
 ```bash
@@ -103,7 +108,9 @@ PYTHONPATH=. python crawler.py --config examples/crawler.yaml --output results.j
 PYTHONPATH=. python crawler.py --urls https://example.com --no-respect-robots --rate-limit 2
 ```
 
-`--respect-robots` is on by default; `--no-respect-robots` skips `robots.txt`. `--output` is a JSON summary of the crawl (pages, failures, stats). YAML `storage:` still saves during the crawl if you pass `--config`.
+`--respect-robots` is on by default; `--no-respect-robots` skips `robots.txt`. `--output` is a JSON summary of the crawl (pages, failures, stats). YAML `storage:` still saves during the crawl if you pass `--config`. Put `logging:` at the **top level** of the YAML (not under `storage:`).
+
+Crawl demo (needs network; live progress; writes `crawl_results.json`):
 
 ```bash
 PYTHONPATH=. python examples/crawl_demo.py
@@ -127,6 +134,14 @@ Storage demo (network; writes `results.jsonl` and `results.csv`; Postgres if `DA
 PYTHONPATH=. python examples/storage_demo.py
 ```
 
+Full homework-style demo (`AdvancedCrawler.from_config`, stats, HTML report + PNG charts):
+
+```bash
+PYTHONPATH=. python examples/advanced_demo.py
+```
+
+Writes `reports/report.html` and `reports/charts/*.png`. Open the HTML in a browser (charts are also embedded). `error_report.json` is only from `error_demo.py`.
+
 Optional local Postgres (Docker Desktop must be running; CLI may be in `~/.docker/bin`):
 
 ```bash
@@ -136,7 +151,28 @@ PYTHONPATH=. python examples/storage_demo.py
 docker compose exec postgres psql -U crawler -d crawler -c "SELECT id, url, title FROM pages;"
 ```
 
-Library usage:
+Library usage (`AdvancedCrawler` + YAML):
+
+```python
+import asyncio
+from crawler import AdvancedCrawler
+
+async def main():
+    crawler = AdvancedCrawler.from_config("examples/crawler.yaml")
+    await crawler.crawl()
+    stats = crawler.get_stats()
+    print(f"Processed: {stats['total_pages']} pages")
+    print(f"Success: {stats['successful']}")
+    print(f"Errors: {stats['failed']}")
+    crawler.export_to_html_report("reports/report.html")
+    await crawler.close()
+
+asyncio.run(main())
+```
+
+`get_stats()` also has `pages_processed` / `successful_requests` / `failed_requests` (same numbers as `total_pages` / `successful` / `failed`). `failed_urls` lists hosts that never became saved pages (for example `RobotsDenied` on google.com). PNG files update only if you call `export_stats(charts_dir=...)`.
+
+Lower-level `AsyncCrawler`:
 
 ```python
 import asyncio
@@ -196,6 +232,13 @@ python -m pytest -q
 | `tests/test_retry_strategy.py` | `execute_with_retry`, exponential backoff, 404 vs 503 |
 | `tests/test_crawler_retry.py` | timeout retries, 503/500/429, 404 no retry, growing timeouts, `error_log`, `get_error_stats()` |
 | `tests/test_circuit_breaker.py` | open / half-open / recover; crawler skips an open domain |
+| `tests/test_sitemap.py` | urlset vs sitemapindex, fake session |
+| `tests/test_crawler_stats.py` | summary keys, JSON/HTML export |
+| `tests/test_config.py` | YAML/JSON → crawler kwargs and storage |
+| `tests/test_cli.py` | argparse flags vs config |
+| `tests/test_log_setup.py` | rotating file + console |
+| `tests/test_progress.py` | live bar denominator |
+| `tests/test_advanced_crawler.py` | `from_config`, `get_stats` aliases, `export_to_html_report` |
 
 `examples/` scripts need the network. They are not pytest tests.
 

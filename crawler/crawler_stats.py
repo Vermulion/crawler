@@ -51,10 +51,14 @@ class CrawlerStats:
             "pages_processed": pages,
             "successful_requests": pages,
             "failed_requests": failed,
+            "total_pages": pages,       # homework alias
+            "successful": pages,
+            "failed": failed,
             "avg_pages_per_second": speed,
             "status_codes": dict(status_codes),
             "top_domains": domains.most_common(self.top_n),
             "elapsed_seconds": elapsed,
+            "failed_urls": dict(c.failed_urls),
         }
 
     def export_to_json(self, filename: str) -> str:

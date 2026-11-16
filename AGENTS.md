@@ -24,10 +24,11 @@ Python async HTTP crawler using **aiohttp**. Package lives in `crawler/`.
 
 ```
 crawler/                 # importable package
-  __init__.py            # AsyncCrawler, HTMLParser, CrawlerQueue, URLFilter,
-                         # SemaphoreManager, RateLimiter, RobotsParser, RobotsDenied,
-                         # RetryStrategy, CircuitBreaker, CrawlerError types,
-                         # DataStorage, JSONStorage, CSVStorage, PostgresStorage
+  __init__.py            # AsyncCrawler, AdvancedCrawler, HTMLParser, CrawlerQueue,
+                         # URLFilter, SemaphoreManager, RateLimiter, RobotsParser,
+                         # RobotsDenied, RetryStrategy, CircuitBreaker, CrawlerError types,
+                         # DataStorage, JSONStorage, CSVStorage, PostgresStorage,
+                         # SitemapParser, CrawlerStats, CrawlerConfig, load_config
   async_crawler.py       # HTTP + crawl loop + error_log / get_error_stats + storage flush
   html_parser.py         # HTMLParser (BeautifulSoup)
   crawler_queue.py       # CrawlerQueue
@@ -39,7 +40,11 @@ crawler/                 # importable package
   circuit_breaker.py     # per-domain open / half-open / closed
   errors.py              # CrawlerError tree + classify_status / classify_exception
   storage.py             # DataStorage ABC; JSON / CSV / Postgres; normalize_page
+  sitemap_parser.py      # sitemap.xml urlset + recursive sitemapindex
+  crawler_stats.py       # snapshot + JSON/HTML/PNG export
   config.py              # YAML/JSON → CrawlerConfig / crawler_from_config
+  log_setup.py           # rotating file + console logging
+  advanced_crawler.py    # from_config / crawl / get_stats / export HTML
   cli.py                 # argparse CLI
   __main__.py            # python -m crawler
 tests/                   # pytest (no network)
@@ -51,6 +56,8 @@ examples/
   polite_demo.py         # rate limit + robots.txt + delay stats
   error_demo.py          # mixed HTTP errors + retries + error_report.json
   storage_demo.py        # crawl → JSONL + CSV; Postgres if DATABASE_URL
+  crawler.yaml           # sample YAML (start_urls, storage, logging)
+  advanced_demo.py       # AdvancedCrawler.from_config → crawl → HTML report
 docker-compose.yml       # optional local Postgres for the storage demo
 crawler.py               # python crawler.py --urls ...
 requirements.txt
@@ -66,11 +73,20 @@ CLI: `python crawler.py` or `python -m crawler --urls URL [--max-pages N] [--max
 - `fetch_url(url: str) -> str` — GET one URL; `respect_robots` then robots.txt; circuit breaker; rate limiter; `SemaphoreManager.limit(url)`; per-try timeout; `RetryStrategy`; `_record` into `error_log`; re-raise `CrawlerError` / `RobotsDenied`
 - `fetch_urls(urls: list[str]) -> dict[str, str]` — parallel GET; skip `CrawlerError` / `RobotsDenied`
 - `fetch_and_parse(url: str) -> dict` — fetch then parse; sets `status_code`, `content_type`, `crawled_at`
-- `crawl(start_urls, max_pages=100, *, max_depth=None) -> dict[str, dict]` — queue + filters + progress; clears `error_log` and rebuilds the circuit breaker; if `storage` is set, `save_many` in batches then `storage.flush()`
+- `crawl(start_urls, max_pages=100, *, max_depth=None, sitemap_urls=None) -> dict[str, dict]` — queue + filters + progress; optional sitemap.xml seeds; clears `error_log` and rebuilds the circuit breaker; if `storage` is set, `save_many` in batches then `storage.flush()`
 - `visited_urls: set[str]`, `processed_urls: dict[str, dict]`, `failed_urls: dict[str, str]`, `blocked_urls: set[str]`, `error_log: list[dict]`, `storage_errors: list[dict]`
 - `get_speed_stats() -> dict` — `requests_per_second`, `avg_delay`, `blocked`, `requests`
 - `get_error_stats() -> dict` — `by_type`, `successful_retries`, `avg_retry_time`, `permanent_error_urls`
+- `get_crawler_stats() -> dict` — `CrawlerStats.summary()` (see aliases below)
 - `close()` — leftover crawler rows, then `storage.flush()` (does **not** close `storage`), then `await session.close()`; also `async with AsyncCrawler() as c`
+
+`AdvancedCrawler.from_config(path)` — YAML/JSON via `load_config` / `crawler_from_config`; sets up rotating logs unless `setup_logs=False`. `from_kwargs(**AsyncCrawler kwargs)`. `crawl()` with no args uses config `start_urls` / `sitemap_urls` / `max_pages` / `max_depth`. `get_stats()` → `summary()`. `export_to_html_report(filename)` and `export_stats(json_path=, html_path=, charts_dir=)`. `close()` flushes the HTTP session then `storage.close()` if config created storage. Prefer `async with AdvancedCrawler.from_config(...)`.
+
+`CrawlerStats.summary()` keys: `pages_processed`, `successful_requests`, `failed_requests`, homework aliases `total_pages` / `successful` / `failed`, `avg_pages_per_second`, `status_codes` (HTTP ints from processed pages + `error_log` failures that have `status`), `top_domains` (processed hosts only), `elapsed_seconds`, `failed_urls`. `export_to_json` / `export_to_html_report` / `export_charts`. HTML embeds PNG (matplotlib Agg). PNG files update only when `charts_dir` is passed. Failures without an HTTP status (e.g. `RobotsDenied` on google.com) increment `failed` / `failed_urls` but do not add a status-code bar. `error_report.json` is written by `examples/error_demo.py`, not the advanced demo.
+
+`SitemapParser` — `parse_sitemap` / `fetch_sitemap`; urlset page URLs; sitemapindex followed recursively.
+
+YAML `logging:` must be a **top-level** key (sibling of `storage:`), not nested under `storage`.
 
 Storage I/O is serialized: `_storage_lock` guards `_storage_buffer`; `_storage_io_lock` guards `save_many` / `flush` so workers do not hit the same backend together (CSV header, asyncpg “another operation is in progress”).
 
@@ -112,7 +128,7 @@ Session: `ClientTimeout(total, connect, sock_read=read_timeout)` + `TCPConnector
 
 Parser page dict: `{url, title, text, links, link_details, metadata, images, headings, tables, lists}` plus crawl fields `status_code`, `content_type`, `crawled_at`.
 
-`crawl` builds `URLFilter` from crawler settings and seed hosts, then `CrawlerQueue`. Progress goes to stderr (`processed`, `queue`, `errors`, `pages/s`, `req/s`, `avg_delay`, `robots_blocked`).
+`crawl` builds `URLFilter` from crawler settings and seed hosts, then `CrawlerQueue`. Progress goes to stderr (`processed`, `queue`, `errors`, `pages/s`, `req/s`, `avg_delay`, `robots_blocked`). The bar denominator is done + pending + active, not `max_pages`.
 
 `error_log` row: `{url, error, attempt, retry, retry_in, result, status, message}`. `result` is `retry`, `failure`, or `success`.
 
