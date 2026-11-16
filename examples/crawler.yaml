@@ -39,8 +39,8 @@ storage:
   # dsn: postgresql://crawler:crawler@localhost:5432/crawler
   # table: pages
 
-  logging:
-    level: INFO          # DEBUG | INFO | WARNING | ERROR
-    file: crawler.log
-    max_bytes: 1000000   # rotate when this file is this large
-    backup_count: 3      # keep crawler.log.1 .. .3
+logging:
+  level: INFO          # DEBUG | INFO | WARNING | ERROR
+  file: crawler.log
+  max_bytes: 1000000   # rotate when this file is this large
+  backup_count: 3      # keep crawler.log.1 .. .3

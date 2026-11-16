@@ -36,8 +36,10 @@ class HTMLParser:
             "tables": [],
             "lists": [],
         }
-
     async def parse_html(self, html: str, url: str) -> dict:
+        return self.parse_html_sync(html, url)
+
+    def parse_html_sync(self, html: str, url: str) -> dict:
         """Parse HTML and return a page dict.
 
         Always returns a dict with ``url``. Extractor failures are logged and
@@ -155,12 +157,12 @@ class HTMLParser:
 
     def extract_text(self, soup: BeautifulSoup, selector: str = None) -> str:
         """Visible text, optionally limited to a CSS selector."""
-        root = BeautifulSoup(str(soup), self.features)
-        if selector:
-            match = root.select_one(selector)
-            if match is None:
-                return ""
-            root = match
+        from copy import copy
+
+        node = soup.select_one(selector) if selector else soup
+        if selector and node is None:
+            return ""
+        root = copy(node)
         for tag in root.find_all(["script", "style", "noscript"]):
             tag.decompose()
         text = root.get_text(separator=" ", strip=True)

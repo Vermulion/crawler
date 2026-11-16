@@ -93,6 +93,13 @@ def _page(url: str, *hrefs: str) -> FakeResponse:
     html = f"<html><head><title>{url}</title></head><body>{anchors}</body></html>"
     return FakeResponse(html, url=url)
 
+def _fanout(n: int) -> tuple[str, dict[str, FakeResponse]]:
+    home = "https://site.test/"
+    kids = [f"https://site.test/p{i}" for i in range(n - 1)]
+    mapping = {home: _page(home, *kids)}
+    for url in kids:
+        mapping[url] = _page(url)
+    return home, mapping
 
 async def _crawl_with_pages(
     mapping: dict[str, FakeResponse],

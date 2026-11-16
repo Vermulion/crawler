@@ -136,6 +136,7 @@ class AsyncCrawler:
         self.sitemap = SitemapParser()
         self.blocked_urls: set[str] = set()
         self._request_times: list[float] = []
+        self._last_progress = 0.0 
         self._requests_done = 0
         self._stats_start = time.monotonic()
         self._robots_lock = asyncio.Lock()
@@ -204,6 +205,11 @@ class AsyncCrawler:
         return "#" * filled + "-" * (width - filled)
 
     def _print_progress(self, queue: CrawlerQueue, *, start: float) -> None:
+        now = time.monotonic()
+        pending = queue.get_stats()["pending"]
+        if pending and now - self._last_progress < 0.1:
+            return
+        self._last_progress = now
         snap = self._progress_snapshot(queue, start=start)
         extra = self.get_speed_stats()
         frac = min(1.0, snap["done"] / snap["cap"])
