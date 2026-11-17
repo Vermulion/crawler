@@ -130,4 +130,3 @@ async def test_run_configures_logging(tmp_path: Path, monkeypatch: pytest.Monkey
     await run(args)
     text = path.read_text(encoding="utf-8")
     assert "probe-from-run" in text
-    logging.getLogger("crawler").handlers.clear()

@@ -140,6 +140,7 @@ Parser page dict: `{url, title, text, links, link_details, metadata, images, hea
 - `fetch_url` logs and re-raises `CrawlerError` (`TransientError` / `PermanentError` / `NetworkError` / `CircuitOpenError`) and `RobotsDenied`. aiohttp errors are classified first.
 - `crawl` records those errors in `failed_urls`.
 - Tests stay offline (fake session in `tests/http_fakes.py`). Demos may use the network.
+- `setup_logging` sets `crawler` logger `propagate=False`. `tests/conftest.py` restores propagate after each test so `caplog` still sees `crawler.*` logs.
 
 ## Do not
 
