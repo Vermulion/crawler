@@ -45,8 +45,11 @@ crawler/                 # importable package
   config.py              # YAML/JSON → CrawlerConfig / crawler_from_config
   log_setup.py           # rotating file + console logging
   advanced_crawler.py    # from_config / crawl / get_stats / export HTML
+  js_renderer.py         # JsRenderer protocol; PlaywrightRenderer (lazy playwright)
+  frontier.py            # Frontier protocol; InMemoryFrontier (shared seen + queue)
   cli.py                 # argparse CLI
   __main__.py            # python -m crawler
+  sync_crawler.py        # sequential crawl for speed comparison tests
 tests/                   # pytest (no network)
 examples/
   fetch_example.py
@@ -66,14 +69,17 @@ requirements-dev.txt
 
 ## Current API
 
-`AsyncCrawler(max_concurrent=10, max_per_domain=2, *, connect_timeout=10, read_timeout=30, total_timeout=60, timeout_backoff_factor=2, timeout_max=120, pool_limit=100, pool_limit_per_host=max_concurrent, same_domain_only=True, include_patterns=None, exclude_patterns=None, requests_per_second=1.0, rate_limit_per_domain=True, min_delay=0, jitter=0, max_retries=0, backoff_factor=0.5, backoff_max=30, retry_strategy=None, circuit_breaker=None, failure_threshold=5, failure_window=60, recovery_timeout=30, user_agent="AsyncCrawler", user_agents=None, storage=None, storage_batch_size=1, storage_max_retries=2, storage_backoff_factor=0.5, respect_robots=True)`
+`AsyncCrawler(max_concurrent=10, max_per_domain=2, *, connect_timeout=10, read_timeout=30, total_timeout=60, timeout_backoff_factor=2, timeout_max=120, pool_limit=100, pool_limit_per_host=max_concurrent, same_domain_only=True, include_patterns=None, exclude_patterns=None, requests_per_second=1.0, rate_limit_per_domain=True, min_delay=0, jitter=0, max_retries=0, backoff_factor=0.5, backoff_max=30, retry_strategy=None, circuit_breaker=None, failure_threshold=5, failure_window=60, recovery_timeout=30, user_agent="AsyncCrawler", user_agents=None, storage=None, storage_batch_size=1, storage_max_retries=2, storage_backoff_factor=0.5, respect_robots=True, proxy=None, cookies=None, js_render=False, js_renderer=None)`
+
+Optional extras (defaults keep old crawl behaviour): `proxy=None` omits `proxy=` on GET; `cookies={}` seeds `ClientSession` cookie jar; `js_render=False` uses aiohttp HTML. YAML `crawler.proxy` is allowed (`_CRAWLER_KEYS`); cookies / js_render are constructor-only unless you add keys later.
 
 CLI: `python crawler.py` or `python -m crawler --urls URL [--max-pages N] [--max-depth N] [--output results.json] [--config FILE] [--respect-robots|--no-respect-robots] [--rate-limit RPS]`. Flags override the config file. `--output` writes processed/failed/stats JSON (does **not** close YAML `storage`; CLI still `storage.close()` after crawl).
 
-- `fetch_url(url: str) -> str` — GET one URL; `respect_robots` then robots.txt; circuit breaker; rate limiter; `SemaphoreManager.limit(url)`; per-try timeout; `RetryStrategy`; `_record` into `error_log`; re-raise `CrawlerError` / `RobotsDenied`
+- `fetch_url(url: str) -> str` — GET one URL; `respect_robots` then robots.txt; circuit breaker; rate limiter; `SemaphoreManager.limit(url)`; per-try timeout; `RetryStrategy`; `_record` into `error_log`; re-raise `CrawlerError` / `RobotsDenied`. Passes `proxy=` on `session.get` when `self.proxy` is set (pages and robots.txt). Always aiohttp, not Playwright.
 - `fetch_urls(urls: list[str]) -> dict[str, str]` — parallel GET; skip `CrawlerError` / `RobotsDenied`
-- `fetch_and_parse(url: str) -> dict` — fetch then parse; sets `status_code`, `content_type`, `crawled_at`
-- `crawl(start_urls, max_pages=100, *, max_depth=None, sitemap_urls=None) -> dict[str, dict]` — queue + filters + progress; optional sitemap.xml seeds; clears `error_log` and rebuilds the circuit breaker; if `storage` is set, `save_many` in batches then `storage.flush()`
+- `fetch_and_parse(url: str) -> dict` — if `js_render` then `_render_js` (Playwright or injected `js_renderer`) and status 200 / `text/html`; else `_fetch_document`; then parse; sets `status_code`, `content_type`, `crawled_at`
+- `crawl(start_urls, max_pages=100, *, max_depth=None, sitemap_urls=None) -> dict[str, dict]` — queue + filters + progress; optional sitemap.xml seeds; clears `error_log` and rebuilds the circuit breaker; if `storage` is set, `save_many` in batches then `storage.flush()`. Unchanged default path (`CrawlerQueue`).
+- `crawl_shared(frontier) -> dict[str, dict]` — same fetch/parse/save as `crawl` workers, but `frontier.get()` / `frontier.add()`; seed URLs with `await frontier.add(url)` first. Does not replace `crawl()`.
 - `visited_urls: set[str]`, `processed_urls: dict[str, dict]`, `failed_urls: dict[str, str]`, `blocked_urls: set[str]`, `error_log: list[dict]`, `storage_errors: list[dict]`
 - `get_speed_stats() -> dict` — `requests_per_second`, `avg_delay`, `blocked`, `requests`
 - `get_error_stats() -> dict` — `by_type`, `successful_retries`, `avg_retry_time`, `permanent_error_urls`
@@ -102,7 +108,13 @@ Saved record (`normalize_page` / `RECORD_FIELDS`): `{url, title, text, links, me
 
 `DataStorage` — ABC: `save`, `save_many`, `flush`, `close`. Default `flush()` is a no-op. JSON/CSV `flush()` writes `_chunks` without closing the file. Crawler `crawl` / `close` call `flush()` so a small crawl still hits disk. Prefer `async with` on the storage object when you are done with the file/DB.
 
-Session: `ClientTimeout(total, connect, sock_read=read_timeout)` + `TCPConnector(limit, limit_per_host, ttl_dns_cache=300, enable_cleanup_closed=True)`. Each GET may pass a larger timeout: `base * timeout_backoff_factor**attempt`, capped by `timeout_max`.
+Session: `ClientTimeout(total, connect, sock_read=read_timeout)` + `TCPConnector(limit, limit_per_host, ttl_dns_cache=300, enable_cleanup_closed=True)` + `cookies=` seed dict (or `None` if empty). Each GET may pass a larger timeout: `base * timeout_backoff_factor**attempt`, capped by `timeout_max`. `_get_cookies()` reads the jar after the session exists.
+
+`JsRenderer` (`crawler.js_renderer`) — `async render(url, timeout=) -> str`. `PlaywrightRenderer` lazy-imports `playwright.async_api` in `start()`. Tests inject a fake renderer; live JS needs `pip install playwright` and `playwright install chromium` (listed in `requirements-dev.txt`, not `requirements.txt`).
+
+`Frontier` / `InMemoryFrontier` (`crawler.frontier`) — `add(url, depth=) -> bool` (new + under caps); `get() -> (url, depth) | None` (`get_nowait`). Shared seen-set for two `AsyncCrawler` instances in one process. Not Redis. `crawl()` still uses `CrawlerQueue`; asyncio workers in `crawl` are not distributed.
+
+`crawl` builds `URLFilter` from crawler settings and seed hosts, then `CrawlerQueue`. Progress goes to stderr (`processed`, `queue`, `errors`, `pages/s`, `req/s`, `avg_delay`, `robots_blocked`). The bar denominator is done + pending + active, not `max_pages`.
 
 `CrawlerQueue(start_urls=None, *, max_pages=None, max_depth=None, url_filter=None)`
 
@@ -128,8 +140,6 @@ Session: `ClientTimeout(total, connect, sock_read=read_timeout)` + `TCPConnector
 
 Parser page dict: `{url, title, text, links, link_details, metadata, images, headings, tables, lists}` plus crawl fields `status_code`, `content_type`, `crawled_at`.
 
-`crawl` builds `URLFilter` from crawler settings and seed hosts, then `CrawlerQueue`. Progress goes to stderr (`processed`, `queue`, `errors`, `pages/s`, `req/s`, `avg_delay`, `robots_blocked`). The bar denominator is done + pending + active, not `max_pages`.
-
 `error_log` row: `{url, error, attempt, retry, retry_in, result, status, message}`. `result` is `retry`, `failure`, or `success`.
 
 ## Conventions
@@ -149,4 +159,4 @@ Parser page dict: `{url, title, text, links, link_details, metadata, images, hea
 
 ## Next likely steps
 
-robots.txt cache refresh.
+robots.txt cache refresh; wait in `InMemoryFrontier.get` while sibling workers are in flight; YAML keys for cookies / js_render if needed.

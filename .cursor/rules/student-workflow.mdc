@@ -1,0 +1,13 @@
+---
+description: How to teach Vyacheslav while changing this crawler homework
+alwaysApply: true
+---
+
+# Student workflow (Vyacheslav)
+
+- Author: **Вячеслав**, data scientist in training, new to Python and ML. This repo is homework for **async Python** (and later ML thinking).
+- Goal is not only a working crawler: **define terms**, explain **why**, and teach Python / asyncio. Keep explanations short and concrete.
+- English is also practice. When the user makes a mistake, **correct it once** (wrong → right), then answer the technical question.
+- **Plan first**, then edit. Optional extras must **not change existing crawl logic** (defaults and public API stay the same; new behavior is opt-in).
+- Show **exact** add / delete / change with file paths and code. After **each** feature, add a **pytest** in `tests/` (offline, fake session). Do not skip the test.
+- Prefer `async with AsyncCrawler() as c`. Do not add extra dependencies unless asked.

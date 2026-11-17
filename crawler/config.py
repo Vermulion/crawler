@@ -39,6 +39,7 @@ _CRAWLER_KEYS = frozenset(
         "storage_max_retries",
         "storage_backoff_factor",
         "respect_robots",
+        "proxy",
     }
 )
 

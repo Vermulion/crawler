@@ -4,6 +4,8 @@ Async HTTP crawler on **aiohttp**. It fetches pages in parallel with a global
 and per-domain concurrency cap, follows same-host links through a priority
 queue, filters URLs, respects `robots.txt`, rate-limits requests, retries
 temporary failures, and can save pages to JSONL, CSV, or PostgreSQL.
+Optional extras (off by default): HTTP **proxy**, seed **cookies**,
+**JavaScript** HTML via Playwright, and a shared **frontier** for two crawlers.
 
 ## What it does
 
@@ -11,6 +13,9 @@ Public classes: `AsyncCrawler`, `AdvancedCrawler`, `HTMLParser`, `CrawlerQueue`,
 `URLFilter`, `SemaphoreManager`, `RateLimiter`, `RobotsParser`, `RetryStrategy`,
 `CircuitBreaker`, `SitemapParser`, `CrawlerStats`, `CrawlerConfig`,
 `DataStorage`, `JSONStorage`, `CSVStorage`, `PostgresStorage`.
+Import `Frontier` / `InMemoryFrontier` from `crawler.frontier` and
+`JsRenderer` / `PlaywrightRenderer` from `crawler.js_renderer` (not on
+`from crawler import ...` yet).
 `RobotsDenied` is raised when `robots.txt` forbids a URL.
 `StorageError` is raised for bad save input. `normalize_page()` builds the
 saved record. `load_config` / `crawler_from_config` read YAML or JSON.
@@ -27,10 +32,15 @@ Load failures are mapped to `CrawlerError` subclasses (`TransientError`,
 | `ClientTimeout` / `TCPConnector` | Connect/read/total timeouts; retries can grow timeouts up to `timeout_max` |
 | `CrawlerQueue` | Pending URLs, priority, depth, seen/processed/failed |
 | `URLFilter` | `same_domain_only`, include (whitelist), exclude (blacklist) |
-| `fetch_url(url) -> str` | GET one page; robots + rate limit + retries; log each try; re-raise `CrawlerError` / `RobotsDenied` |
+| `fetch_url(url) -> str` | GET one page; robots + rate limit + retries; optional `proxy=`; log each try; re-raise `CrawlerError` / `RobotsDenied` |
 | `fetch_urls(urls) -> dict[str, str]` | Parallel GET; skip `CrawlerError` / `RobotsDenied` |
-| `fetch_and_parse(url) -> dict` | Fetch + parse; add `status_code`, `content_type`, `crawled_at` |
-| `crawl(start_urls, max_pages, max_depth=, sitemap_urls=)` | Walk links; optional sitemap.xml seeds; fill visited/processed/failed; optional `storage.save_many` |
+| `fetch_and_parse(url) -> dict` | aiohttp fetch + parse, or Playwright HTML when `js_render=True`; add `status_code`, `content_type`, `crawled_at` |
+| `crawl(start_urls, max_pages, max_depth=, sitemap_urls=)` | Walk links (`CrawlerQueue`); optional sitemap.xml seeds; fill visited/processed/failed; optional `storage.save_many` |
+| `crawl_shared(frontier)` | Same fetch/parse/save, URLs from a shared `Frontier` (seed with `frontier.add`) |
+| `proxy=` | Optional HTTP proxy URL on each GET (and robots.txt). `None` = omit the argument |
+| `cookies=` | Optional seed dict for the aiohttp cookie jar (`ClientSession`) |
+| `js_render` / `js_renderer` | Opt-in JS rendering; tests inject a fake; live use needs Playwright + Chromium |
+| `InMemoryFrontier` | Shared seen-set + queue for two crawlers in one process (not Redis) |
 | `SitemapParser` | Fetch sitemap.xml; urlset pages; follow sitemapindex |
 | `CrawlerStats` / `get_crawler_stats()` | Snapshot: pages, errors, status codes, top domains; JSON/HTML/PNG export |
 | `AdvancedCrawler` | Config + logs + crawl + `get_stats()` + HTML report |
@@ -85,6 +95,36 @@ success (byte count), each error row (`url`, `error`, `attempt`, `retry_in`,
 `respect_robots=True` by default. Every `fetch_url` loads `robots.txt` once
 per origin and skips disallowed paths. Pass `respect_robots=False` or
 `--no-respect-robots` to skip that check.
+
+### Optional extras (defaults unchanged)
+
+**Proxy.** `AsyncCrawler(proxy="http://127.0.0.1:8080")` passes that URL to
+`session.get`. YAML: `crawler.proxy` in the config file. Omit the key (or
+`proxy: null`) so requests go direct. The sample `examples/crawler.yaml` may
+show a proxy line; delete it unless you actually run a local proxy.
+
+**Cookies.** `AsyncCrawler(cookies={"sid": "abc"})` fills the session jar.
+After a crawl, `_get_cookies()` returns name → value from the live jar.
+This is the same `ClientSession` as keep-alive; there is no second session type.
+
+**JavaScript.** aiohttp downloads source HTML only. `js_render=True` makes
+`fetch_and_parse` (and therefore `crawl`) take HTML from a `JsRenderer`
+instead of `_fetch_document`. Inject `js_renderer=` in tests. For a real
+browser: `pip install -r requirements-dev.txt` then `playwright install chromium`.
+`fetch_url` always stays on aiohttp.
+
+**Shared frontier.** `crawl()` already runs several **asyncio** workers in one
+process with RAM `CrawlerQueue`. `crawl_shared(frontier)` is the extra for
+**two crawler objects** sharing `InMemoryFrontier` (seen URLs + pending queue).
+Seed first, then gather:
+
+```python
+from crawler.frontier import InMemoryFrontier
+
+frontier = InMemoryFrontier(max_pages=50)
+await frontier.add("https://example.com")
+await asyncio.gather(c1.crawl_shared(frontier), c2.crawl_shared(frontier))
+```
 
 ## How to start
 
@@ -239,6 +279,11 @@ python -m pytest -q
 | `tests/test_log_setup.py` | rotating file + console |
 | `tests/test_progress.py` | live bar denominator |
 | `tests/test_advanced_crawler.py` | `from_config`, `get_stats` aliases, `export_to_html_report` |
+| `tests/test_proxy.py` | `proxy=` on GET vs omitted |
+| `tests/test_cookies.py` | seed cookies on `ClientSession` |
+| `tests/test_js_render.py` | fake renderer, no browser |
+| `tests/test_distributed.py` | two crawlers, one `InMemoryFrontier`, no duplicate GET |
+| `tests/test_performance.py` | async vs sync speed (offline fan-out) |
 
 `examples/` scripts need the network. They are not pytest tests.
 

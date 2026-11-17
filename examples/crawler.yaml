@@ -9,6 +9,7 @@ crawler:
   backoff_factor: 0.5
   user_agent: AsyncCrawler
   respect_robots: true
+  proxy: http://127.0.0.1:8080  # omit this key = no proxy
 
 start_urls:
   - https://example.com

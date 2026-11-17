@@ -25,6 +25,8 @@ from crawler.errors import CrawlerError, TransientError, classify_exception, Cir
 from crawler.retry_strategy import RetryStrategy
 from crawler.storage import DataStorage
 from crawler.crawler_stats import CrawlerStats
+from crawler.js_renderer import JsRenderer
+from crawler.frontier import Frontier
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,10 @@ class AsyncCrawler:
         storage_max_retries: int = 2,
         storage_backoff_factor: float = 0.5,
         respect_robots: bool = True,
+        proxy: Optional[str] = None,
+        cookies: Optional[dict[str, str]] = None,
+        js_render: bool = False,
+        js_renderer: Optional[JsRenderer] = None,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
@@ -133,6 +139,7 @@ class AsyncCrawler:
         self.jitter = jitter
         self.robots = RobotsParser()
         self.respect_robots = respect_robots
+        self.proxy = proxy
         self.sitemap = SitemapParser()
         self.blocked_urls: set[str] = set()
         self._request_times: list[float] = []
@@ -161,6 +168,9 @@ class AsyncCrawler:
         self.storage_backoff_factor = storage_backoff_factor
         self.storage_errors: list[dict] = []
         self.stats = CrawlerStats(self)
+        self.cookies = dict(cookies or {})
+        self.js_render = js_render
+        self.js_renderer = js_renderer
 
     def _progress_snapshot(self, queue: CrawlerQueue, *, start: float) -> dict:
         stats = queue.get_stats()
@@ -271,6 +281,12 @@ class AsyncCrawler:
         """Pages, success/fail, speed, status codes, top domains, elapsed time."""
         return self.stats.summary()
 
+    def _get_cookies(self) -> dict[str, str]:
+        session = self._session
+        if session is None:
+            return dict(self.cookies)
+        return {c.key: c.value for c in session.cookie_jar}
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(
@@ -287,6 +303,7 @@ class AsyncCrawler:
             self._session = aiohttp.ClientSession(
                 timeout=timeout,
                 connector=connector,
+                cookies=self.cookies or None,
             )
         return self._session
 
@@ -306,6 +323,7 @@ class AsyncCrawler:
                 async with session.get(
                     robots_url,
                     headers={"User-Agent": user_agent},
+                    **({"proxy": self.proxy} if self.proxy else {}),
                 ) as response:
                     status = response.status
                     text = await response.text()
@@ -429,6 +447,7 @@ class AsyncCrawler:
                         url,
                         headers={"User-Agent": agent},
                         timeout=timeout,
+                        **({"proxy": self.proxy} if self.proxy else {}),
                     ) as response:
                         response.raise_for_status()
                         body = await response.text()
@@ -515,8 +534,18 @@ class AsyncCrawler:
         body, _status, _content_type = await self._fetch_document(url)
         return body
 
+    async def _render_js(self, url: str) -> str:
+        if self.js_renderer is None:
+            from crawler.js_renderer import PlaywrightRenderer
+            self.js_renderer = PlaywrightRenderer()
+        return await self.js_renderer.render(url)
+
     async def fetch_and_parse(self, url: str) -> dict:
-        html, status, content_type = await self._fetch_document(url)
+        if self.js_render:
+            html = await self._render_js(url)
+            status, content_type = 200, "text/html"
+        else:
+            html, status, content_type = await self._fetch_document(url)
         page = await self.parser.parse_html(html, url)
         page["status_code"] = status
         page["content_type"] = content_type
@@ -610,6 +639,30 @@ class AsyncCrawler:
         self._print_progress(queue, start=start)
         print(file=sys.stderr)
 
+        return self.processed_urls
+
+    async def crawl_shared(self, frontier: Frontier) -> dict[str, dict]:
+        """Fetch/parse/save like crawl(), but URLs come from a shared frontier."""
+
+        async def worker() -> None:
+            while True:
+                item = await frontier.get()
+                if item is None:
+                    return
+                url, depth = item
+                self.visited_urls.add(url)
+                try:
+                    page = await self.fetch_and_parse(url)
+                    self.processed_urls[url] = page
+                    await self._enqueue_storage(page)
+                    for link in page.get("links") or []:
+                        await frontier.add(link, depth=depth + 1)
+                except (CrawlerError, RobotsDenied) as exc:
+                    self.failed_urls[url] = f"{type(exc).__name__}: {exc}"
+
+        workers = max(1, self.max_concurrent)
+        await asyncio.gather(*(worker() for _ in range(workers)))
+        await self._flush_storage()
         return self.processed_urls
 
     async def _enqueue_storage(self, page: dict) -> None:
